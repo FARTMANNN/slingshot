@@ -498,6 +498,7 @@ static void sm_open_menu(void) {
     NSView *cv = g_win.contentView;
     SmMenuView *v = [[SmMenuView alloc] initWithFrame:cv.bounds];
     v.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; v.wantsLayer = YES;
+    v.layer.drawsAsynchronously = YES;   // (its drawing runs off the main thread, which also paces the game's presents)
     v.accessibilityElement = YES; v.accessibilityRole = NSAccessibilityGroupRole; v.accessibilityLabel = @"Slingshot menu";
     g_sm_view = v; [cv addSubview:v]; hq_fade(v, 1);
     [NSCursor setHiddenUntilMouseMoves:NO];

@@ -442,17 +442,28 @@ static NSFont *smc_font_px(float px) {
     }
     return sm_font(SM_REGULAR, px);
 }
-static void smc_d_rect(void *u, float x0, float y0, float x1, float y1, uint32_t c, float r) { (void)u; sm_fill(NSMakeRect(x0, y0, x1 - x0, y1 - y0), smc_col(c), r); }
+// A measuring pass (smc_overlay_tick) runs the module's drawing with nothing drawn, only the box around what it would draw kept (in its pixels): the view then
+// redraws only where something was or is, not the whole window 30 times a second
+static int g_smc_measure; static CGRect g_smc_box;
+static void smc_grow(float x0, float y0, float x1, float y1) { g_smc_box = CGRectUnion(g_smc_box, CGRectMake(MIN(x0, x1), MIN(y0, y1), fabsf(x1 - x0), fabsf(y1 - y0))); }
+static void smc_d_rect(void *u, float x0, float y0, float x1, float y1, uint32_t c, float r) {
+    (void)u; if (g_smc_measure) { smc_grow(x0, y0, x1, y1); return; }
+    sm_fill(NSMakeRect(x0, y0, x1 - x0, y1 - y0), smc_col(c), r);
+}
 static void smc_d_circle(void *u, float x, float y, float r, uint32_t c, float th) {
+    if (g_smc_measure) { smc_grow(x - r - th, y - r - th, x + r + th, y + r + th); return; }
     (void)u; NSBezierPath *p = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x - r, y - r, 2 * r, 2 * r)];
     if (th <= 0) { [smc_col(c) setFill]; [p fill]; } else { p.lineWidth = th; [smc_col(c) setStroke]; [p stroke]; }
 }
 static void smc_d_triangle(void *u, float x0, float y0, float x1, float y1, float x2, float y2, uint32_t c) {
+    if (g_smc_measure) { smc_grow(MIN(x0, MIN(x1, x2)), MIN(y0, MIN(y1, y2)), MAX(x0, MAX(x1, x2)), MAX(y0, MAX(y1, y2))); return; }
     (void)u; NSBezierPath *p = [NSBezierPath bezierPath]; [p moveToPoint:NSMakePoint(x0, y0)]; [p lineToPoint:NSMakePoint(x1, y1)]; [p lineToPoint:NSMakePoint(x2, y2)]; [p closePath];
     [smc_col(c) setFill]; [p fill];
 }
+static float smc_d_text_width(void *u, float px, const char *s);
 static void smc_d_text(void *u, float x, float y, float px, uint32_t c, const char *s) {
     (void)u; if (!s || !*s) return;
+    if (g_smc_measure) { smc_grow(x, y, x + smc_d_text_width(u, px, s), y + px * 1.5f); return; }
     [smc_str(s) drawAtPoint:NSMakePoint(x, y) withAttributes:@{NSFontAttributeName: smc_font_px(px), NSForegroundColorAttributeName: smc_col(c)}];
 }
 static float smc_d_text_width(void *u, float px, const char *s) { (void)u; return s && *s ? (float)[smc_str(s) sizeWithAttributes:@{NSFontAttributeName: smc_font_px(px)}].width : 0; }
@@ -481,6 +492,7 @@ static int smc_d_image(void *u, int w, int h, const uint8_t *rgba) {
 }
 static void smc_d_draw_image(void *u, int id, float x0, float y0, float x1, float y1, uint32_t tint) {
     (void)u; if (id <= 0 || id > (int)g_smc_images.count) return;
+    if (g_smc_measure) { smc_grow(x0, y0, x1, y1); return; }
     CGImageRef im = (__bridge CGImageRef)g_smc_images[id - 1];
     CGContextRef cg = NSGraphicsContext.currentContext.CGContext; CGRect r = CGRectMake(0, 0, x1 - x0, y1 - y0);
     CGContextSaveGState(cg);
@@ -498,11 +510,11 @@ static void smc_d_draw_image(void *u, int id, float x0, float y0, float x1, floa
 - (BOOL)isFlipped { return YES; }
 - (NSView *)hitTest:(NSPoint)p { (void)p; return nil; }   // the mouse goes to the game
 - (void)drawRect:(NSRect)rect {
-    (void)rect;
+    CGContextRef cg = NSGraphicsContext.currentContext.CGContext;
+    CGContextClearRect(cg, rect);   // (only the part asked for is redrawn: smc_overlay_tick)
     if (!smc_find_draw() || !g_smc_draw_wanted()) return;
     CGFloat k = self.window.backingScaleFactor ?: 1;
     NSSize z = self.bounds.size;
-    CGContextRef cg = NSGraphicsContext.currentContext.CGContext;
     CGContextSaveGState(cg); CGContextScaleCTM(cg, 1 / k, 1 / k);   // the module draws in the picture's pixels
     smc_draw_t d = {(float)(z.width * k), (float)(z.height * k), NULL, smc_d_rect, smc_d_circle, smc_d_triangle, smc_d_text, smc_d_text_width,
                     smc_d_font, smc_d_use_font, smc_d_image, smc_d_draw_image};
@@ -527,10 +539,26 @@ static void smc_overlay_tick(void) {
     }
     // Redrawn 30 times a second only while the module has something to draw. With nothing (no chat lines, no name tags in sight) the view is hidden, so the
     // window server puts the game's picture on screen alone again: a transparent layer over it costs a composite of the whole window each frame
+    // The part redrawn is where something was drawn last time and where it is now (a measuring pass of the module's drawing, nothing drawn), so a name tag
+    // moving redraws a few hundred pixels, not the window's 3.7 million
+    static CGRect was;
     int want = g_smc_draw_wanted() != 0;
-    if (want) { if (g_smc_overlay.hidden) g_smc_overlay.hidden = NO; g_smc_overlay.needsDisplay = YES; }
-    else if (g_smc_drew) g_smc_overlay.needsDisplay = YES;   // (once more, to clear what was drawn)
-    else if (!g_smc_overlay.hidden) g_smc_overlay.hidden = YES;
+    CGFloat k = g_win.backingScaleFactor ?: 1;
+    CGRect now = CGRectNull;
+    if (want) {
+        NSSize z = g_smc_overlay.bounds.size;
+        smc_draw_t d = {(float)(z.width * k), (float)(z.height * k), NULL, smc_d_rect, smc_d_circle, smc_d_triangle, smc_d_text, smc_d_text_width,
+                        smc_d_font, smc_d_use_font, smc_d_image, smc_d_draw_image};
+        g_smc_box = CGRectNull; g_smc_measure = 1; g_smc_font_cur = 0;
+        if (g_smc_draw2) g_smc_draw2(&d); else g_smc_draw1(&d);
+        g_smc_measure = 0;
+        if (!CGRectIsNull(g_smc_box)) now = CGRectInset(CGRectMake(g_smc_box.origin.x / k, g_smc_box.origin.y / k, g_smc_box.size.width / k, g_smc_box.size.height / k), -6, -6);
+        if (g_smc_overlay.hidden) g_smc_overlay.hidden = NO;
+    }
+    CGRect dirty = CGRectUnion(was, now);
+    if (!CGRectIsNull(dirty)) [g_smc_overlay setNeedsDisplayInRect:NSRectFromCGRect(dirty)];
+    else if (!want && !g_smc_overlay.hidden) g_smc_overlay.hidden = YES;   // nothing drawn, nothing to draw: hidden, so the game's picture is shown alone
+    was = now;
     g_smc_drew = want;
 }
 
