@@ -1,0 +1,90 @@
+--- a/hookshot/CMakeLists.txt
++++ b/hookshot/CMakeLists.txt
+@@ -50,13 +50,19 @@
+   # GetAdaptersAddresses: the Host dialog's Same network and VPN rows name each network card.
+   target_link_libraries(hookshot_coop PRIVATE iphlpapi)
+ else()
+-  # Linux: the clipboard through the desktop's tools (wl-copy, xclip, xsel); Windows has its own.
++  # Linux: the clipboard through the desktop's tools (wl-copy, xclip, xsel); macOS: pbcopy, pbpaste; Windows has its own.
+   target_sources(hookshot_coop PRIVATE src/coop_clipboard_posix.cpp)
+   # The game's bridge opens the module by its full path (RTLD_LOCAL); the renderer's menu tabs and
+   # drawing (patches 0001, 0012) and the world hooks (0005) then find it with
+   # dlopen("hookshot_coop.so", RTLD_NOLOAD), and glibc matches a bare name to a loaded library only
+   # by its SONAME. Without one they got nothing: no Multiplayer tab, chat or name tags on Linux.
+-  target_link_options(hookshot_coop PRIVATE -Wl,-soname,hookshot_coop.so)
++  if(APPLE)
++    # Slingshot (the Mac build of the game, nxnative): its co-op bridge opens the module by its full path and finds
++    # its exports with dlsym on that handle, so no install name is needed beyond the default.
++    set_target_properties(hookshot_coop PROPERTIES SUFFIX ".dylib")
++  else()
++    target_link_options(hookshot_coop PRIVATE -Wl,-soname,hookshot_coop.so)
++  endif()
+   # The C++ runtime inside the module (none of its symbols exported), so it loads into the game on any
+   # distribution from the one it was built on (CI: Ubuntu 22.04, glibc 2.35, as Longshot's own) up,
+   # whatever libstdc++ that system has.
+--- a/hookshot/src/coop_clipboard_posix.cpp
++++ b/hookshot/src/coop_clipboard_posix.cpp
+@@ -36,12 +36,14 @@
+ // The first tool this desktop has, at most 2 s (`timeout`, when there is one). %s: the tool to look
+ // for and its command, for Wayland, then xclip's and xsel's commands. 127: none. Fixed strings only:
+ // no clipboard text is ever put in them.
++#ifndef __APPLE__
+ constexpr const char* kPickTool =
+     "t=; command -v timeout >/dev/null 2>&1 && t='timeout 2'; "
+     "if [ -n \"$WAYLAND_DISPLAY\" ] && command -v %s >/dev/null 2>&1; then exec $t %s; "
+     "elif [ -n \"$DISPLAY\" ] && command -v xclip >/dev/null 2>&1; then exec $t %s; "
+     "elif [ -n \"$DISPLAY\" ] && command -v xsel >/dev/null 2>&1; then exec $t %s; "
+     "else exit 127; fi";
++#endif
+ 
+ thread_local bool t_sdl_thread = false;   // (OnSdlThread)
+ 
+@@ -141,12 +143,17 @@
+         }
+     }
+     char cmd[1024];
++#ifdef __APPLE__
++    // macOS (Slingshot): the system's own pbcopy and pbpaste, always there
++    std::snprintf(cmd, sizeof cmd, "%s", copy ? "exec /usr/bin/pbcopy" : "exec /usr/bin/pbpaste");
++#else
+     if (copy) {
+         std::snprintf(cmd, sizeof cmd, kPickTool, "wl-copy", "wl-copy", "xclip -selection clipboard -i", "xsel -b -i");
+     } else {
+         std::snprintf(cmd, sizeof cmd, kPickTool, "wl-paste", "wl-paste -n", "xclip -selection clipboard -o",
+                       "xsel -b -o");
+     }
++#endif
+     // (close-on-exec: a process another thread starts meanwhile must not hold the pipe's write end, or
+     // the read below would wait for that process; our child gets it as its standard output by dup2)
+     int pipe_fd[2] = {-1, -1};
+@@ -375,6 +382,11 @@
+ }
+ 
+ void* GameSdl(const char* name) {
++#ifdef __APPLE__
++    // Slingshot (the Mac's native game, no SDL) exports the few SDL calls co-op asks for itself: SDL_GetModState,
++    // SDL_GetClipboardText, SDL_free (its slingshot_coop_mac.h); RTLD_DEFAULT finds them in the game's program.
++    return dlsym(RTLD_DEFAULT, name);
++#else
+     // (NOLOAD: only the library the game has loaded, found by its soname; kept once found)
+     static std::atomic<void*> lib{nullptr};
+     void* h = lib.load(std::memory_order_acquire);
+@@ -393,6 +405,7 @@
+         }
+     }
+     return dlsym(h, name);
++#endif
+ }
+ 
+ OnSdlThread::OnSdlThread() : was_(t_sdl_thread) {
+--- a/hookshot/src/coop_rando.cpp
++++ b/hookshot/src/coop_rando.cpp
+@@ -671,7 +671,7 @@
+     if (ec) return {};
+     const auto when = fs::last_write_time(ootrr, ec);
+     if (ec) return {};
+-    return std::to_string(size) + "-" + std::to_string(when.time_since_epoch().count());
++    return std::to_string(size) + "-" + std::to_string(static_cast<long long>(when.time_since_epoch().count()));   // (libc++ on macOS: a 128-bit count)
+ }
+ 
+ std::string ChatSafe(std::string line, std::size_t max_chars) {

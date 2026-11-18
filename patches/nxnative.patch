@@ -1,0 +1,716 @@
+diff --git a/dm/games/0400486024DEC000/patches.py b/dm/games/0400486024DEC000/patches.py
+index 2e7727a0..f0e660e9 100644
+--- a/dm/games/0400486024DEC000/patches.py
++++ b/dm/games/0400486024DEC000/patches.py
+@@ -1,6 +1,6 @@
+ # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
+ # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+-from nso_asm import ADRP, B
++from nso_asm import ADRP, B, LDRX
+ 
+ # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
+ # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
+@@ -104,6 +104,101 @@ movie_cap = 'movie update cap: 3 pictures a frame, the frame step\'s largest hol
+ # sets the frame to the pictures the player has taken (the player's +0xc: its update adds what it advances each frame; reset when a movie starts, as +0x2f8 is), so the
+ # timeline follows the picture whatever the frame takes. The player is the object at +0x10, already read by both draws (main+0x3b5ce80 on it) just before.
+ movie_frame = 'movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn'
++# ---- Squadala! co-op on Slingshot (github.com/daurosk/oot-remake-multiplayer; dm/slingshot/src/coop/bridge.c) ----
++# Co-op's module (the PC kit's hookshot_coop, built for macOS) needs the same three points of the game that its Longshot patches hook
++# (its hookshot/patches 0001 nx2/coop_hooks.py and 0002 nx2/coop_puppet_guard.py), on build e0f3ccfa (1.1.1), the only one co-op supports.
++# Without the module the gates go in and out at once (no callback attached) and the guard changes nothing for an actor that has the component.
++#  - The frame hook: moduleCalc_ calls the frame function (main+0x3b4e300) from main+0x6e6dd8 (rarely) and main+0x6e70f8 (every frame), each
++#    right after mov x0, x20. Longshot runs co-op after that mov; the gate here runs just before it, the same point for the module (the mov
++#    only sets the call's argument). The module may call the game's functions from there (slingshot/src/coop/bridge.c call()).
++#  - The AI hold: the blr x8 at main+0x369df8 answers a BSA component (x21) its calc bits for the frame in w0; the gate at the next
++#    instruction (ldrh w8, [x21, #0xc4], which leaves w0 alone) hands them to the module, which may change them.
++#  - The puppet guard: a co-op puppet (CoopPuppet_*, a stripped copy of Link) has no component in slot 10 of its table, and main+0x4b8240
++#    reads through it ([x8+0x20] after [actor+0x270]+0x50); when it or its +0x20 is null the stub goes to the function's own way out for
++#    "nothing to mark" (main+0x4b83b8, where its cbz at main+0x4b8348 goes), as on the emulator. Link, who has the component, runs as shipped.
++OBS_COOP = 27   # dm/host/dm.h; the gate number's upper bits: the site (slingshot/src/coop/bridge.c SITE_*)
++COOP_BUILD = 'e0f3ccfaf50065ae4ea01eb5aeb13b1a'
++OBS = {COOP_BUILD: [
++    (0x6e6dd4, OBS_COOP | 0 << 8, 'aa1403e0', "co-op frame hook (rare site): moduleCalc_'s mov x0, x20 before its bl to the frame function at main+0x6e6dd8"),
++    (0x6e70f4, OBS_COOP | 1 << 8, 'aa1403e0', "co-op frame hook (every frame): moduleCalc_'s mov x0, x20 before its bl to the frame function at main+0x6e70f8"),
++    (0x369dfc, OBS_COOP | 8 << 8, '79418aa8', 'co-op AI hold: after the blr x8 that answers a BSA component (x21) its calc bits in w0; the ldrh w8, [x21, #0xc4] runs after it'),
++    # The world events (co-op's patches 0003/0005 nx2/coop_platform_lift.py and 0007 nx2/coop_actor_lift.py): each Longshot hook runs after one
++    # instruction; the gate here is on the next one (or on that one, when it leaves the registers the event reads alone). Event numbers: co-op's
++    # hookshot/src/hos_coop_world.h and hos_coop_actors.h
++    (0x5e6778, OBS_COOP | 9 << 8, 'aa0003f3', 'co-op world: an AI ExecuteGenericCounter node starts (x0, main+0x5e6760\'s mov x19, x0): COUNTER_START'),
++    (0x372a98, OBS_COOP | 10 << 8, '39442408', 'co-op actors: requestCreateActorAsync after its prologue (before ldrb w8, [x0, #0x109]): CREATE_FROM, CREATE_REQUEST, CREATE_STOP'),
++    (0xa65d4, OBS_COOP | 11 << 8, 'aa1303e1', 'co-op actors: a delete request accepted (x19 the actor, x20 the reason; before mov x1, x19): DELETE_REQUEST'),
++    (0x49dcb4, OBS_COOP | 12 << 8, 'b940726a', "co-op actors: the Life step's damage sum in w9 (before ldr w10, [x19, #0x70]): LIFE_STEP, which may change w9"),
++    (0x49dcbc, OBS_COOP | 13 << 8, '0aa97d29', 'co-op actors: the Life step before it tests its life stops (w10, before the bic): LIFE_STOPS, which may set w10 to 0'),
++    (0xc16d24, OBS_COOP | 14 << 8, 'aa0103f6', "co-op actors: the game's shoot code (x1: the shooter, x0: the shot record; mov x22, x1): SHOOT_FROM"),
++    # The title screen (co-op's patch 0004, nx2/coop_title_hooks.py: the Multiplayer rows on it): the game's UITitleScreen (vtable 0x84c106e8) at three
++    # points, each gate on an instruction that does not depend on where it is (Longshot's hooks run after the one before it, the same point)
++    (0x3406940, OBS_COOP | 15 << 8, 'f9401660', "co-op title: its set-up (slot 93) with its buttons made (x19 the screen; ldr x0, [x19, #0x28]): HOS_COOP_TITLE_SETUP"),
++    (0x3406d74, OBS_COOP | 16 << 8, '7100051f', "co-op title: its active step (slot 96) after its first instruction (x0 the screen; cmp w8, #1): HOS_COOP_TITLE_STEP"),
++    (0x34067b0, OBS_COOP | 17 << 8, 'aa0003f3', "co-op title: its deleting destructor (x0 the screen; mov x19, x0): HOS_COOP_TITLE_GONE"),
++]}
++def coop_puppet_guard(ctx):
++    here, emit = ctx.here, ctx.emit
++    site, out, back = 0x4b8340, 0x4b83b8, 0x4b8344
++    ctx.site(site, '081140f9')   # ldr x8, [x8, #0x20]
++    for off, orig in ((0x4b8338, 'a83a41f9'), (0x4b833c, '082940f9'), (0x4b8344, '08e540f9'), (0x4b8348, '880300b4')):
++        ctx.site(off, orig)   # ldr x8, [x21, #0x270]; ldr x8, [x8, #0x50]; ldr x8, [x8, #0x1c8]; cbz x8, main+0x4b83b8 (checked, not changed)
++    start = here()
++    emit(0xb5000048); emit(B(here(), out))   # cbnz x8, +8; the component is missing: out
++    emit(0xf9401108)                          # ldr x8, [x8, #0x20]
++    emit(0xb5000048); emit(B(here(), out))   # cbnz x8, +8; its +0x20 is null: out
++    emit(B(here(), back))
++    ctx.put(site, [B(site, start)], 'co-op puppet guard: a missing slot-10 component (or its +0x20) goes to the function\'s own way out at main+0x4b83b8')
++# The wrapped game functions (co-op's patches 0005, 0013, 0014, 0017 and 0024: nx2/coop_world_wraps.py, coop_player_wraps.py): every call, direct,
++# tail or through a table, reaches the function's first instruction, which branches to a stub here. The stub reads the host's wrap entry from
++# the frame step state page (+0xc00, written by dm/slingshot/src/coop/bridge.c once the co-op module is on; 0 before and without it: the stub runs
++# the function as shipped): with it, x16 = the wrap id and x15 = the function's own start (its first instruction, then a branch to the
++# rest), and the host's entry calls the module before and after the function (hos_coop_wrap phases 0 and 1), with the caller's stack as it
++# was. x15..x17 are free at a function's entry (AAPCS64). (id, main offset, first words), as co-op lists them; ids: its hos_coop_world.h
++COOP_STATE_WRAP = 0xc00
++COOP_WRAPS = (
++    (1, 0xb99980, ('d503237f', 'd10243ff', 'fd0013e8', 'a9037bfd')),    # FLAG_APPLY: the game applies its queued flag writes
++    (2, 0xeee640, ('d503237f', 'a9bd7bfd', 'f9000bfc', 'a9024ff4')),    # TIME_SET: the game sets its clock
++    (3, 0xd7a820, ('b940b808', '37580808', 'd503237f', 'd10103ff')),    # EVENT_REQUEST: the event manager is asked for an event
++    (4, 0x6733b0, ('d503237f', 'a9bd7bfd', 'f9000bf5', 'a9024ff4')),    # BRAIN_VERB: a BSA component's brain verb is set (bosses)
++    (5, 0xc08f0, ('d503237f', 'd10743ff', 'a9187bfd', 'f900cbfc')),     # ACTION_VERB: a BSA component is asked for an action verb (bosses)
++    (6, 0x32d8690, ('d503237f', 'a9be7bfd', 'f9000bf3', '910003fd')),   # SAVE_LOADED: after every save load
++    (7, 0x32c1db0, ('d503237f', 'a9bd7bfd', 'f9000bf5', 'a9024ff4')),   # SAVE_LOAD_START
++    (8, 0x32c2080, ('d503237f', 'a9bf7bfd', '910003fd', 'b000dea8')),   # TEMP_LOAD_START
++    (9, 0x32bbce0, ('d503237f', 'a9be7bfd', 'f9000bf3', '910003fd')),   # GAME_OVER_SAVE
++    (16, 0x279ce80, ('d503237f', 'a9be7bfd', 'a9014ff4', '910003fd', 'd0012708', 'aa0003f3', 'f000ae20', '913b6c00')),   # PLAYER_BUTTONS
++    (17, 0x279e2c0, ('d503237f', 'a9be7bfd', 'a9014ff4', '910003fd', '90012708', 'aa0003f3', 'b000ae20', '913b6c00')),   # PLAYER_STICKS
++    (18, 0x3025850, ('d000f388', '9138e108', 'f9400109', 'b4000149', '9100c128', 'b940010a', '3500012a', 'b940352a')),   # PLAYER_INPUT_OFF
++    (19, 0x3b25e00, ('d503237f', 'a9be7bfd', 'f9000bf3', '910003fd', '9104400a', '5100042b', '9102c009', 'aa0003e8')),   # CONTROLLER_GET
++    (24, 0x440630, ('d503237f', 'a9bb7bfd', 'a90167fa', 'a9025ff8')),   # SOUND_EMIT: xlink2's searchAndEmit
++)
++COOP_WRAP_MASK = sum(1 << w for w, _, _ in COOP_WRAPS)   # (slingshot/src/coop/bridge.c says the same bits to the module: HOS_COOP_WORLD_HELLO)
++def _le(word): return bytes.fromhex(word)[::-1].hex()   # an instruction word as its bytes
++def coop_wraps(ctx):
++    here, emit = ctx.here, ctx.emit
++    if not getattr(ctx, 'state', 0): return   # no frame step state page: no wraps (the module runs without them)
++    for wid, off, words in COOP_WRAPS:
++        ctx.site(off, ''.join(_le(w) for w in words))
++        first = int(words[0], 16)
++        start = here()
++        emit(ADRP(16, here(), ctx.state))                   # adrp x16, the state page
++        emit(LDRX(17, 16, COOP_STATE_WRAP // 8))            # ldr x17, [x16, #0xc00]: the host's wrap entry
++        emit(0xb4000091)                                    # cbz x17, +16: none, the function as shipped
++        emit(0x1000006f)                                    # adr x15, +12: the function's own start
++        emit(0xd2800010 | wid << 5)                         # movz x16, #id
++        emit(0xd61f0220)                                    # br x17
++        if first & 0x9f000000 == 0x90000000:                # an adrp: its page from here
++            imm = (((first >> 5) & 0x7ffff) << 2 | (first >> 29) & 3) << 12
++            emit(ADRP(first & 31, here(), (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)))
++        else:
++            emit(first)                                     # the first instruction (position independent: checked above)
++        emit(B(here(), off + 4))
++        ctx.put(off, [B(off, start)], f'co-op wrap {wid}: the function\'s calls go through the host\'s wrap entry while the co-op module is on')
++def coop_stubs(ctx):
++    coop_puppet_guard(ctx)
++    coop_wraps(ctx)
++STUBS = {COOP_BUILD: coop_stubs}
++
+ MATCH_CUTS = {'main': [
+     {'name': movie_pictures, 'size': 828, 'fingerprints': ['f61ad468b6b4e1d574fe8678f5a12dfc60e1aab71be7375142a4b48b0d73ce19'],   # v131072 main+0x3b5cec0
+      'cuts': [(452, '88b79c1a', '48008052', movie_pictures + ' (cinc w8, w28, ge → mov w8, #2; as v131072 main+0x3b5d084)')]},
+@@ -118,6 +213,12 @@ MATCH_CUTS = {'main': [
+ ]}
+ 
+ BINDING = [
++    {'what': 'co-op hooks: frame (two sites) and AI hold, observation gates', 'now': 'build', 'goal': 'build', 'purpose': 'mods',
++     'why': "Squadala!'s co-op module supports only this build (e0f3ccfa, 1.1.1) and finds the same sites by address on Longshot",
++     'checked': 'v131072 main: the words at main+0x6e6dd4/0x6e6dd8, 0x6e70f4/0x6e70f8 and 0x369df8/0x369dfc as co-op\'s nx2/coop_hooks.py lists them (2026-11-17)'},
++    {'what': 'co-op puppet guard: a missing slot-10 component skips the hair marks', 'now': 'build', 'goal': 'build', 'purpose': 'mods',
++     'why': "co-op's own guard (its nx2/coop_puppet_guard.py) for the same build; the actor that has the component runs as shipped",
++     'checked': 'v131072 main: the five words at main+0x4b8338..0x4b8348 as co-op lists them (2026-11-17)'},
+     {'what': 'movie pictures a frame: up to 2', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+      'why': "the game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main",
+      'checked': 'v131072 main: one function with this fingerprint, the constructor, its one caller, the update and the advance read by disassembly; the limit and the count read in play with DM_PROBE, the opening movie timed at a 30 fps frame step without and with the cut (2026-11-12)'},
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index ffb86725..cfe32b65 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -617,7 +617,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
+     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
+     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
+     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
+-    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
++    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); nvn_coop_tex_gone(o->serial); mtl_tex_release(o); }
+     memset(o, 0, sizeof *o);
+     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
+     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
+@@ -640,9 +640,10 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
+     OLOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)t, o->d.width, o->d.height, o->d.depth,
+          o->d.levels, o->d.format, o->d.target, o->d.flags, o->L.size);
+     ft_add(o);
++    nvn_coop_tex_made(o);   // (a co-op module's texture overrides: slingshot/src/coop/textures.c)
+     return 1;
+ }
+-NVN(nvnTextureFinalize, void, NVNtexture *t) { ft_del(TX(t)->serial); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
++NVN(nvnTextureFinalize, void, NVNtexture *t) { ft_del(TX(t)->serial); nvn_coop_tex_gone(TX(t)->serial); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
+ NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
+ NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
+ NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 44229b14..5eb97b6b 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3807,7 +3807,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+     void *mb; uint64_t mo;
+     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
+     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
+-    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
++    // A co-op module's override over its storage (slingshot/src/coop/textures.c): deswizzled on the CPU from a copy with the override laid over it (the GPU paths read the pool itself)
++    int ov = !sparse && nvn_coop_tex_overridden((uint64_t)(uintptr_t)t->mem, t->L.size);
++    if (!linear && !rb_shift && !sparse && !ov && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
+     // A sparse pool's texture is gathered on the GPU through its page table (sp_pages_gpu), but on the CPU for DM_NVN_ZBLOCK, which counts its blocks there
+     uint64_t *spt = NULL, spn = 0;
+     t_tex_upload_lookup = 1;
+@@ -3817,9 +3819,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+         up_begin(); src_batch = g_up_seq;
+         if (!sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0)) { free(spt); spt = NULL; }
+     }
+-    int use_gpu = !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
++    int use_gpu = !linear && !rb_shift && !ov && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
+     t_tex_upload_lookup = 0;
+-    if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
++    if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear && !ov) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
+     if (use_gpu) {
+         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
+         up_begin();
+@@ -3885,6 +3887,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
+         if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("sparse texture copy of %llu bytes failed", (unsigned long long)t->L.size);
+         sp_store_wait(t); nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
+     }
++    if (ov) {   // the co-op module's bytes over the game's (the game's memory keeps its own)
++        if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("co-op override copy of %llu bytes failed", (unsigned long long)t->L.size);
++        memcpy(part, t->mem, t->L.size); nvn_coop_tex_overlay((uint64_t)(uintptr_t)t->mem, part, t->L.size); src = part;
++    }
+     up_begin();
+     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+     res_add(stg); [g_up_keep addObject:stg];
+@@ -15142,8 +15148,32 @@ static int skip_fs_draw(NvProg *pr) {
+     return 0;
+ }
+ static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
++// The game's camera for a co-op module's name tags (Squadala!'s hos_coop_draw.h: hos_coop_camera_wanted / hos_coop_camera; Longshot's vk_coop.cpp): for a draw
++// into the scene's colour target (R11G11B10F, with depth), while the module still wants a camera from a target that size this frame, the draw's vertex-stage
++// uniform buffer 3, its first 0x130 bytes (the game's camera block: view-projection at 0x30, the target's size at 0x120), as this draw reads it. Set by
++// Slingshot's co-op bridge (dm/slingshot/src/coop/bridge.c); NULL: none
++int (*dm_coop_camera_wanted)(uint64_t frame, float width, float height);
++void (*dm_coop_camera)(uint64_t frame, const float *block, float width, float height);
++static void coop_camera_draw(void) {
++    const tex_t *c = R.rt.color[0];
++    if (!R.rt.depth || c->d.format != NVN_FORMAT_R11G11B10F) return;
++    unsigned lv = R.rt.has_cview[0] && R.rt.cview[0].set_levels ? R.rt.cview[0].base_level : 0;
++    float w = (float)MAX(1u, c->d.width >> lv), h = (float)MAX(1u, c->d.height >> lv);
++    uint64_t frame = atomic_load(&g_cur_frame);
++    if (!dm_coop_camera_wanted(frame, w, h)) return;
++    const p_bind_buf *u = &S.ubo[0][3];
++    float block[0x130 / 4]; int kind;
++    if (!u->addr || u->size < sizeof block) return;
++    if (!pend_read(u->addr, sizeof block, block, &kind)) {
++        void *mb; uint64_t mo; const uint8_t *base;
++        if (pend_hits(u->addr, sizeof block) || !mtl_addr(u->addr, sizeof block, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return;
++        memcpy(block, base + mo, sizeof block);
++    }
++    dm_coop_camera(frame, block, w, h);
++}
+ static void draw_(const p_draw *dw, const p_draw_idx *di) {
+     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
++    if (dm_coop_camera_wanted && R.has_rt && R.rt.n >= 1 && R.rt.color[0]) coop_camera_draw();   // (a co-op module's name tags: above)
+     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
+         PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
+            p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
+@@ -17191,6 +17221,7 @@ void mtl_exec(const uint8_t *p) {
+ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+ static id<MTLSamplerState> g_blit_samp;
+ static uint64_t g_present_n;
++void (*dm_present_hook)(void);   // called at each present (the front end's: Slingshot's co-op bridge, dm/slingshot/src/coop/bridge.c); NULL: none
+ uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
+ void mtl_res_snapshot(mtl_res_count *out) {
+     memset(out, 0, sizeof *out);
+@@ -18053,6 +18084,7 @@ static double g_link_it_tin;   // Enqueue time of the frame the display-link cal
+ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
+     g_present_n++;
++    if (dm_present_hook) dm_present_hook();
+     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
+         if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
+         MLOG("[bootprof] t=%.3f s present #%llu: metallibs loaded %llu / %.1f ms; pipelines created %llu / %.1f ms (all synchronous on the submit thread); prewarmed and used: shaders %llu / render pipelines %llu / compute pipelines %llu; "
+diff --git a/dm/gfx/nvn/nvn_obj.h b/dm/gfx/nvn/nvn_obj.h
+index bf56444e..e24cda15 100644
+--- a/dm/gfx/nvn/nvn_obj.h
++++ b/dm/gfx/nvn/nvn_obj.h
+@@ -355,6 +355,11 @@ void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool fin
+ void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
+ // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
+ void mtl_tex_cpu_written(const tex_t *t);
++// A co-op module's texture overrides (slingshot/src/coop/textures.c: Squadala!'s hos_coop_texture.h, Longshot's patch 0020): the textures made, and the bytes laid over their storage
++void nvn_coop_tex_made(const tex_t *t);
++void nvn_coop_tex_gone(uint64_t serial);
++int nvn_coop_tex_overridden(uint64_t addr, uint64_t n);
++void nvn_coop_tex_overlay(uint64_t addr, uint8_t *data, uint64_t n);
+ void mtl_tex_linear_cpu_written(const tex_t *t);   // the same for a linear texture, except one viewed on its pool's buffer, which reads its storage itself (tex_linear)
+ void mtl_tex_gpu_written(const tex_t *t);   // a GPU write into the texture's storage is recorded: uncompressed textures over it are no longer taken from storage (tex_cpu_content)
+ int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index 894bbd18..9f1457a5 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -75,13 +75,17 @@ FORCE:
+ # lists the headers its source read (-MMD; -MP: a removed header is no error), so an edit rebuilds the objects that include it and the link; the Makefile (CFLAGS, these lines)
+ # rebuilds them all. The generated headers come first (order-only: the dependency files name them for the sources that read them). The NSP script builds gen/<id>/dmhost and takes it
+ HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
+-HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+-HOST_SRC = $(SRC) $(GFX)
+-ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
+-$(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))
++HOST_FRAMEWORKS = -framework Cocoa -framework CoreText -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
++# Slingshot (the Mac front end's menu, mods and Squadala! co-op, dm/slingshot/README.md): its compiled sources (the co-op bridge, dm/slingshot/src/coop), by wildcard.
++# Its headers (dm/slingshot/src/*.h) are included by front_mac.m
++# and the decoding half of zstd it reads size tables with (dm/slingshot/src/third_party/zstd, BSD)
++SLINGSHOT=$(sort $(wildcard ../slingshot/src/*.c ../slingshot/src/coop/*.c ../slingshot/src/coop/*.S ../slingshot/src/third_party/zstd/lib/common/*.c ../slingshot/src/third_party/zstd/lib/decompress/*.c))
++HOST_SRC = $(SRC) $(GFX) $(SLINGSHOT)
++ifneq ($(filter ../%,$(filter-out ../gfx/% ../slingshot/%,$(HOST_SRC))),)
++$(error host sources outside dm/host, dm/gfx and dm/slingshot need an object rule: $(filter ../%,$(filter-out ../gfx/% ../slingshot/%,$(HOST_SRC))))
+ endif
+ OBJ_DIR = gen/$(GAME)/obj
+-HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(OBJ_DIR)/host/$(s).o))   # the line's order: the link lays code out in it
++HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(if $(filter ../slingshot/%,$(s)),$(OBJ_DIR)/slingshot/$(s:../slingshot/%=%).o,$(OBJ_DIR)/host/$(s).o)))   # the line's order: the link lays code out in it
+ HOST_BIN = gen/$(GAME)/dmhost
+ $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+ 	@mkdir -p $(dir $@)
+@@ -89,6 +93,10 @@ $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+ $(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+ 	@mkdir -p $(dir $@)
+ 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
++$(OBJ_DIR)/slingshot/src/third_party/%.o: HOST_CFLAGS += -DZSTD_DISABLE_ASM -w   # (vendored as it is: its own warnings are not ours)
++$(OBJ_DIR)/slingshot/%.o: ../slingshot/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
++	@mkdir -p $(dir $@)
++	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
+ $(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
+ 	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
+ 	dsymutil $@
+diff --git a/dm/host/dm.h b/dm/host/dm.h
+index 70051dcd..dfe87041 100644
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -135,7 +135,8 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
+        OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
+        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: its callback writes the size (hle_svc.c)
+        OBS_UE_REGION = 26,                                             // the store of Unreal's engine region size before nninitStartup reserves it: the register its upper bits name (dm/tools/ue_region.py, hle_svc.c)
+-       OBS_MAX = 27 };
++       OBS_COOP = 27,                                                  // Slingshot's co-op hooks (slingshot/src/coop/bridge.c): the site in the upper bits (dm/games/0400486024DEC000/patches.py)
++       OBS_MAX = 28 };
+ // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
+ // effect when the gate returns (entry.S restores them from the frame), which OBS_STDALLOC_INIT and OBS_UE_REGION do
+ void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
+diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
+index 5962d159..02b87193 100644
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -165,6 +165,9 @@ static int fn_shortcut(NSEvent *e) {
+ }
+ static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel;   // the controller applet's prompt (front_ctrl_support) and a key pressed in it since its last step
+ static int cp_poll(void);
++void coop_bridge_stop(void);   // slingshot/src/coop/bridge.c
++void coop_bridge_keys_clear(void);
++static int sm_key(unsigned short c, int down); static int sm_pad(void); static int sm_blocks(void); static void sm_toggle(void); static void sm_hq_prompt(void);   // Slingshot's in-game menu (slingshot/src/menu.h)
+ static void on_key(NSEvent *e, int down) {
+     if (!g_input_on) return;
+     unsigned short c = e.keyCode;
+@@ -172,6 +175,7 @@ static void on_key(NSEvent *e, int down) {
+         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
+         return;
+     }
++    if (sm_key(c, down)) return;   // Slingshot's menu: F1 or Esc opens it, and while it is open it has the keyboard
+     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
+     // could be turned only with a controller (Donkey Kong Bananza)
+@@ -210,6 +214,7 @@ static int pad_gc_unread(GCController *c) { return hidpad_gc_unread(c) || jc1_gc
+ static void pad_read(GCExtendedGamepad *g) {
+     if (!g_input_on) return;
+     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
++    if (sm_pad()) return;   // Slingshot's menu has the controllers
+     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
+     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
+     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
+@@ -381,7 +386,7 @@ static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
+     if (d->sink != p + 1) { d->sink = p + 1; dm_haptics_apple_set_sink(p, dm_hidpad_rumble); }   // its rumble goes over HID, not to a Core Haptics engine
+ }
+ static void hidpad_read(hid_pad *d) {
+-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
++    if (!g_input_on || hq_blocks_input(g_hq.phase) || sm_blocks()) return;
+     int p = hidpad_player(d), full = hidpad_full(d);
+     uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
+     if (p < 0 && (!hidpad_first_press(d) || !m || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
+@@ -427,10 +432,10 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *)) {
+     if (!g_merge || g_merge_sink == sink) return;
+     g_merge_sink = sink; dm_haptics_apple_set_sink(0, sink);
+ }
+-static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
++static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase) || sm_blocks(); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
+ static void s2pad_read(s2_pad *d) {
+     hq_poll();   // Home and the prompt's A and B come from these pads too
+-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
++    if (!g_input_on || hq_blocks_input(g_hq.phase) || sm_blocks()) return;
+     int p = s2pad_player(d);
+     uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, &m, s)) return;
+     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+@@ -470,7 +475,7 @@ static int jc1pad_player(jc1_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots
+ static int jc1pad_blocked(void) { return s2pad_blocked(); }
+ static void jc1pad_read(jc1_pad *d) {
+     hq_poll();   // Home and the prompt's A and B come from these pads too
+-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
++    if (!g_input_on || hq_blocks_input(g_hq.phase) || sm_blocks()) return;
+     int p = jc1pad_player(d);
+     uint64_t m; int32_t s[4]; if (!jc1_pad_state(d, &m, s)) return;
+     if (p < 0) {   // joins at its first button
+@@ -558,6 +563,7 @@ static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
+         g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; hq_poll(); }];
+         break;
+     case HQ_PROMPT: {
++        sm_hq_prompt();   // the quit prompt takes over from Slingshot's menu
+         pads_release();   // nothing the game held stays pressed while the prompt has the controllers
+         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+         dm_focus_set(2);
+@@ -588,6 +594,7 @@ static void hq_poll(void) {
+     double now = CACurrentMediaTime();
+     hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
+     if (ph != was) hq_changed(was, ph, holder);
++    if (g_hq.tapped) { g_hq.tapped = 0; sm_toggle(); }   // a tap of Home: Slingshot's menu
+     double fill = hq_ring(&g_hq, now);
+     if (fill >= 0) {
+         if (!g_hq_hold) { NSView *cv = g_win.contentView; CAShapeLayer *ring = nil; g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring); g_hq_ring = ring; [cv addSubview:g_hq_hold]; hq_fade(g_hq_hold, 1); }
+@@ -600,6 +607,7 @@ static void hq_close(void) {
+     if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
+     hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
+ }
++#include "../slingshot/src/menu.h"   // Slingshot's in-game menu, after the Home prompt's code whose helpers it uses
+ // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640): the game asked for more players than it sees, and the game's thread waits while
+ // the prompt is up over the game, as the Switch's player screen. A controller that joins meanwhile is a player at once (its first button with DM_PAD_PRESS_TO_JOIN, its
+ // connection without), and the count on the card follows. A and B are GameController's buttonA and buttonB on any controller, as the Home prompt's (a raw HID pad's A and B,
+@@ -1630,6 +1638,7 @@ void front_run(void (*guest)(void)) {
+         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
+         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
+             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
++        [[bar addItemWithTitle:@"Slingshot" action:nil keyEquivalent:@""] setSubmenu:sm_menu_bar_menu()];
+         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
+         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+         NSApp.mainMenu = bar;
+@@ -1667,15 +1676,18 @@ void front_run(void (*guest)(void)) {
+                 if (conn) hq_log_setting(); }];
+         dm_haptics_apple_init();
+         pads_start();
++        sm_start();   // Slingshot: the remembered FPS counter and performance overlay
+         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
++            if (smc_play_key(e)) return nil;   // with the menu closed, Squadala!'s module has each key first (its chat box, its panels); while it has the keyboard, the game gets none
++            if (smc_type(e)) return nil;   // a Squadala! page that types (its name, address and password fields) has every key, repeats too; ⌘V pastes (slingshot/src/squadala.h)
+             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
+             if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
+             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
+             return nil;   // Swallow it to avoid the system beep
+         }];
+         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
+-                                                      usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
++                                                      usingBlock:^(NSNotification *n) { (void)n; coop_bridge_stop(); exit(0); }];   // co-op leaves its game first (slingshot/src/coop/bridge.c)
+         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
+         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
+         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+@@ -1688,7 +1700,7 @@ void front_run(void (*guest)(void)) {
+         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
+         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
+         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
+-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
++        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); coop_bridge_keys_clear(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
+         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
+index 881bbc7e..fe312154 100644
+--- a/dm/host/hle_audren.c
++++ b/dm/host/hle_audren.c
+@@ -347,6 +347,7 @@ static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out, int
+     memmove(buf, buf + nch * n, (RS_T - 1) * nch * 4);
+     return m;
+ }
++void (*dm_audio_mix_hook)(float *const *out, int channels, int frames);   // the front end's sound added into each frame at 48 kHz, full scale 1.0 (Slingshot's co-op voice); NULL: none
+ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {   // six sink channels, then the stereo fold, per sample
+     if (len < 0x20) return 0;
+     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
+@@ -426,6 +427,15 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {   //
+                 else { f[6] = f[0]; f[7] = f[1]; }
+             }
+             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st, DM_AUDIO_SINK_CHANNELS);
++            if (dm_audio_mix_hook && nout <= FRAME_MAX) {   // Slingshot: Squadala!'s voices into the frame, before the clamp (dm/slingshot/src/coop/voice.c)
++                static float vl[FRAME_MAX], vr[FRAME_MAX]; float *v[2] = {vl, vr};
++                memset(vl, 0, nout * sizeof *vl); memset(vr, 0, nout * sizeof *vr);
++                dm_audio_mix_hook(v, 2, (int)nout);
++                for (uint32_t s = 0; s < nout; s++) {
++                    int32_t l = (int32_t)(fmaxf(-1, fminf(1, vl[s])) * 32767), r = (int32_t)(fmaxf(-1, fminf(1, vr[s])) * 32767), *f = st + DM_AUDIO_SINK_CHANNELS * s;
++                    f[0] += l; f[1] += r; f[6] += l; f[7] += r;   // (front left and right, and the stereo fold)
++                }
++            }
+             uint64_t loud = 0;
+             for (uint32_t s = 0; s < nout * DM_AUDIO_SINK_CHANNELS; s++) {
+                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
+index befbfaaf..4cf9e1c5 100644
+--- a/dm/host/hle_fs.c
++++ b/dm/host/hle_fs.c
+@@ -54,6 +54,7 @@ typedef struct {
+     int aoc;                         // add-on content: Unmount releases the name (mount_aoc)
+     int released;                    // an add-on content entry after its Unmount: kept for open handles and a later mount of its image, matched by no name (mnt_is)
+     int txn_root;                    // canonical mount entry for this backing transaction, or -1
++    int rom;                         // the game's RomFS: its overlay folders are the front end's mod folders (dm_rom_overlay_set), then DM_ROMFS_OVERLAY's
+     _Atomic int poison;              // failure state belongs to this backing, not to the process
+     _Atomic uint64_t first_write_ns;
+ } mount_t;
+@@ -63,9 +64,24 @@ static int g_nmnt;
+ static int mnt_is(const mount_t *m, const char *s, size_t n) { return !m->released && strlen(m->name) == n && !strncmp(m->name, s, n); }
+ static int mnt_named(const mount_t *m, const char *name) { return mnt_is(m, name, strlen(name)); }
+ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
++static char g_coop_save_mount[32];   // the account save's mount name, for Squadala!'s save exports (h_fs_MountSave; hos_coop_fs_save_root below)
+ static pthread_mutex_t g_path_lock = PTHREAD_MUTEX_INITIALIZER;
+ static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
+ #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
++// The front end's mod folders (Slingshot's mods, slingshot/src/mods.h): RomFS overlay folders before DM_ROMFS_OVERLAY's, which change while the game runs (a mod
++// switched on or off, another skin). Opens, stats and listings look the overlay up each time, so the game takes a changed file the next time it loads it.
++// Under the path lock, as every reader of a mount's overlay
++static char g_mod_overlay[2048];
++static void rom_overlay_join(char *out, size_t n) {
++    const char *env = getenv("DM_ROMFS_OVERLAY");
++    snprintf(out, n, "%s%s%s", g_mod_overlay, g_mod_overlay[0] && env && *env ? ":" : "", env ? env : "");
++}
++void dm_rom_overlay_set(const char *roots) {
++    PATH_LOCK();
++    strlcpy(g_mod_overlay, roots ? roots : "", sizeof g_mod_overlay);
++    for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].rom) rom_overlay_join(g_mnt[i].overlay, sizeof g_mnt[i].overlay);
++    LOG("fs rom overlay: %s", g_mod_overlay[0] ? g_mod_overlay : "(no mod folders)");
++}
+ static uint8_t g_fmode[65536];              // fd → open mode
+ static _Atomic uint16_t g_ftxn[65536];       // fd → 1-based canonical transaction index, or 0
+ static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
+@@ -192,11 +208,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
+     if (g_nmnt >= MAX_MOUNT) die("mount table full");
+     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
+     g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].aoc = 0; g_mnt[g_nmnt].released = 0; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
+-    g_mnt[g_nmnt].txn_root = -1;
++    g_mnt[g_nmnt].txn_root = -1; g_mnt[g_nmnt].rom = 0;
+     atomic_store(&g_mnt[g_nmnt].poison, 0);
+     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
+-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
+-    if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
++    if (!strcmp(name, "rom")) { g_mnt[g_nmnt].rom = 1; rom_overlay_join(g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay); }
+     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
+     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
+     int txn_err = 0, k = 0;
+@@ -549,11 +564,10 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
+ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
+     (void)cache; (void)sz; char b[1024];
+     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
+-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
+-    if (r == RES_OK && overlay) {
++    if (r == RES_OK) {
+         PATH_LOCK();
+         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
+-            strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
++            g_mnt[i].rom = 1; rom_overlay_join(g_mnt[i].overlay, sizeof g_mnt[i].overlay); break;
+         }
+     }
+     return r;
+@@ -941,7 +955,9 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv; each regis
+     if (!d) die("DM_SAVE is not set: point it at a writable copy of a save directory");
+     char dd[1024]; if (user_save_dir(dd, sizeof dd, d, user)) return RES_FAIL;
+     if (!user) save_sync_or_stop(dd);   // sync the primary account before cloning its work directory
+-    return mount_ex(name, dd, 0, 1);
++    Result r = mount_ex(name, dd, 0, 1);
++    if (!user && r == RES_OK) { pthread_mutex_lock(&g_lock); strlcpy(g_coop_save_mount, name, sizeof g_coop_save_mount); pthread_mutex_unlock(&g_lock); }   // (Squadala!'s exports, below)
++    return r;
+ }
+ // Device save data: one save for the console instead of one per user. Animal Crossing: New Horizons keeps its island there (3.0.3's main mounts no account save data at all); the host
+ // has one player, so it is the host save directory with its transaction, as the account save. Its size and extension follow the account save's.
+@@ -961,6 +977,83 @@ HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv; device save data s
+ HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv; extend device save data: the host directory has no size limit", Result, h_fs_ExtendDeviceSave, int64_t size, int64_t journal) { return h_fs_ExtendSave(NULL, size, journal); }
+ // The restore flag marks save data the system restored from a backup (cloud save data backup), which a game may check once and then clear with the commit option below; the host never restores
+ HLE_FORCE("_ZN2nn2fs22GetSaveDataRestoreFlagEPbPKc", "fsp-srv; save data restored from a backup: never", Result, h_fs_RestoreFlag, uint8_t *out, const char *name) { (void)name; *out = 0; return RES_OK; }
++// ---- Squadala!'s save exports (its module finds them by name, dlsym RTLD_DEFAULT; Longshot's patches 0008 and 0025) ----
++// The host's save for its guests: a guest of another player's session plays from <its save folder>-coop, into which the host's save comes; the module
++// decides that when it joins, before a save is loaded (hos_coop_fs_save_root, hos_coop_fs_save_remount). Here the account save is a transaction (a work
++// copy swapped in at each Commit), so the move makes the new folder's own transaction: its work copy is cloned and every name of that save (the device
++// save too, when it is the same) reads and writes there from then on; what the old work copy held uncommitted is dropped, as nothing of it was saved.
++// Refused while the game has a file of that save open (its handle would point into the dropped copy).
++// And the slot the game plays (patch 0025): the folder (<save root>/slot_NN) whose progress.sav it opened last on the account save, for reading or
++// writing, and a count of those opens, so the host sends the slot its game loaded, not the newest file on disk. Named as in the committed folder.
++static char g_coop_slot[1024]; static unsigned g_coop_slot_opens; static int g_coop_slot_write;
++static int coop_save_mount_locked(void) {   // its transaction's entry, or -1 (g_lock held)
++    if (!g_coop_save_mount[0]) return -1;
++    for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], g_coop_save_mount)) return g_mnt[i].txn_root >= 0 ? g_mnt[i].txn_root : -1;
++    return -1;
++}
++__attribute__((visibility("default"))) int hos_coop_fs_save_root(char *out, size_t cap) {
++    if (!out || !cap) return 0;
++    pthread_mutex_lock(&g_lock);
++    int i = coop_save_mount_locked();
++    if (i >= 0) strlcpy(out, g_mnt[i].commit, cap);
++    pthread_mutex_unlock(&g_lock);
++    return i >= 0;
++}
++__attribute__((visibility("default"))) int hos_coop_fs_save_remount(const char *root) {
++    char dir[1024], work[1100], neu[1100], old_work[1024];
++    if (!root || !*root || strlen(root) >= sizeof dir) return 0;
++    strlcpy(dir, root, sizeof dir); size_t L = strlen(dir); while (L > 1 && dir[L - 1] == '/') dir[--L] = 0;
++    for (char *q = dir + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(dir, 0755); *q = '/'; }   // (mkdir -p)
++    mkdir(dir, 0755);
++    pthread_once(&g_txn_lock_once, txn_locks_init);
++    PATH_LOCK(); pthread_mutex_lock(&g_lock);
++    int i = coop_save_mount_locked();
++    if (i < 0) { pthread_mutex_unlock(&g_lock); LOG("[RED] Squadala!: the account save is not mounted as a transaction: not moved to %s", dir); return 0; }
++    if (!strcmp(g_mnt[i].commit, dir)) { pthread_mutex_unlock(&g_lock); return 1; }
++    int open_n = 0; for (int k = 0; k < 65536; k++) open_n += atomic_load(&g_ftxn[k]) == (uint16_t)(i + 1);
++    if (open_n) { pthread_mutex_unlock(&g_lock); LOG("[RED] Squadala!: the account save has %d file(s) open: not moved to %s now", open_n, dir); return 0; }
++    pthread_rwlock_wrlock(&g_txn_lock[i]);
++    snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
++    save_old_names(dir, dir);
++    const char *why = NULL;
++    if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear its work directory left over from last time";
++    else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear its .new left over from last time";
++    else if (clonefile(dir, work, 0)) why = "cloning its work directory failed";
++    if (why) { pthread_rwlock_unlock(&g_txn_lock[i]); pthread_mutex_unlock(&g_lock); LOG("[RED] Squadala!: the account save not moved to %s: %s (errno=%d)", dir, why, errno); return 0; }
++    strlcpy(old_work, g_mnt[i].dir, sizeof old_work);
++    char was[1024]; strlcpy(was, g_mnt[i].commit, sizeof was);
++    for (int k = 0; k < g_nmnt; k++) if (g_mnt[k].txn_root == i) { strlcpy(g_mnt[k].commit, dir, sizeof g_mnt[0].commit); strlcpy(g_mnt[k].dir, work, sizeof g_mnt[0].dir); }
++    atomic_store(&g_mnt[i].poison, 0); atomic_store(&g_mnt[i].first_write_ns, 0);
++    g_coop_slot[0] = 0;
++    pthread_rwlock_unlock(&g_txn_lock[i]);
++    pthread_mutex_unlock(&g_lock);
++    if (strcmp(old_work, work)) rm_tree(old_work);
++    LOG("fs: Squadala! moved the account save (%s:) from %s to %s (its own transaction, work directory %s)", g_coop_save_mount, was, dir, work);
++    return 1;
++}
++__attribute__((visibility("default"))) unsigned hos_coop_fs_save_slot_opened(char *out, size_t cap, int *write) {
++    pthread_mutex_lock(&g_lock);
++    unsigned n = g_coop_slot_opens;
++    if (out && cap) strlcpy(out, g_coop_slot, cap);
++    if (write) *write = g_coop_slot_write;
++    pthread_mutex_unlock(&g_lock);
++    return n;
++}
++// h_fs_OpenFile: an open of progress.sav on the account save (its host path in the work copy, named in the committed folder)
++static void coop_note_slot_open(const char *path, const char *hp, int write) {
++    static const char kProgress[] = "progress.sav";
++    size_t k = sizeof kProgress - 1, n = strlen(hp);
++    const char *c = strstr(path, ":/");
++    if (!c || n <= k + 1 || strcasecmp(hp + n - k, kProgress) || hp[n - k - 1] != '/') return;
++    pthread_mutex_lock(&g_lock);
++    int i = coop_save_mount_locked();
++    size_t m = strlen(g_coop_save_mount), wl = i >= 0 ? strlen(g_mnt[i].dir) : 0;
++    if (i >= 0 && m == (size_t)(c - path) && !strncmp(g_coop_save_mount, path, m) && !strncmp(hp, g_mnt[i].dir, wl) && hp[wl] == '/') {
++        snprintf(g_coop_slot, sizeof g_coop_slot, "%s%.*s", g_mnt[i].commit, (int)(n - k - 1 - wl), hp + wl);
++        g_coop_slot_write = write; g_coop_slot_opens++;
++    }
++    pthread_mutex_unlock(&g_lock);
++}
+ static _Atomic uint64_t g_save_commits;   // number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")
+ uint64_t dm_fs_commit_count(void) { return atomic_load(&g_save_commits); }
+ // The cloud sender's copy of a committed save (save_sync.c): a Commit holds both locks for its clone and swap, so the clone taken under them is one whole committed version
+@@ -1103,6 +1196,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
+     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
+     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
+     g_fmode[fd] = (uint8_t)mode; *out = FH_OUT(fd);
++    coop_note_slot_open(path, hp, (mode & (MODE_WRITE | MODE_APPEND)) != 0);   // (Squadala!'s save slot, above)
+     { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0;
+       for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
+       atomic_store(&g_ftxn[fd], token); }
+diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
+index cc3b61e4..9623b372 100644
+--- a/dm/host/hle_hid.c
++++ b/dm/host/hle_hid.c
+@@ -560,6 +560,10 @@ static void rec_start(void) {
+     LOG("DM_REC: recording player 1's input to %s as DM_KEYS steps in presented frames", e);
+ }
+ 
++// Squadala!'s module (slingshot/src/coop/bridge.c, Longshot's patch 0004): player 1's pad goes through it first (its title menu, down but not out), and the word the game
++// got is kept for it. NULL: no module
++uint64_t (*dm_coop_pad_filter)(uint64_t buttons, int32_t stick[4]);
++_Atomic uint64_t dm_coop_pad_word;
+ // Stick direction pseudo-buttons (NpadButton 16..23) from the sticks' values
+ static uint64_t stick_dirs(const int32_t a[4]) {
+     uint64_t b = 0;
+@@ -609,8 +613,9 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
+     }
+     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
+-    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+     b &= 0xffffull;
++    if (!pl && dm_coop_pad_filter) b = dm_coop_pad_filter(b, a) & 0xffffull;   // Squadala!'s module first (the stick directions follow its sticks)
++    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+     if (s->lx < -STICK_THRESH) b |= 1u << 16;
+     if (s->ly > STICK_THRESH) b |= 1u << 17;
+     if (s->lx > STICK_THRESH) b |= 1u << 18;
+@@ -620,6 +625,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+     if (s->rx > STICK_THRESH) b |= 1u << 22;
+     if (s->ry < -STICK_THRESH) b |= 1u << 23;
+     s->buttons = b;
++    if (!pl) atomic_store_explicit(&dm_coop_pad_word, b, memory_order_relaxed);
+     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+ }
+ // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
+diff --git a/dm/host/home_quit.h b/dm/host/home_quit.h
+index 64b6b9de..119223ee 100644
+--- a/dm/host/home_quit.h
++++ b/dm/host/home_quit.h
+@@ -14,6 +14,7 @@
+ 
+ #define HQ_HOLD_S 2.0    // how long Home is held before the prompt opens
+ #define HQ_RING_S 0.3    // the hold indicator shows only after this, so a short press shows nothing
++#define HQ_TAP_S 0.6     // Slingshot: Home let go within this is a tap (tapped is set; front_mac.m opens Slingshot's menu)
+ 
+ typedef enum {
+     HQ_IDLE,      // nothing shown, the game has its input
+@@ -28,6 +29,7 @@ typedef struct {
+     double since;     // when the hold started (seconds, any clock that only goes forward)
+     int home;         // Home was down at the last step (a press is a change from up to down)
+     int a_up, b_up;   // A and B have been up since the prompt opened: a button already held when it opens does not count
++    int tapped;       // Slingshot: Home was tapped (let go within HQ_TAP_S); the caller clears it
+ } home_quit;
+ 
+ // Whether the hold does anything: on unless DM_HOME_QUIT=0 (env: its value, NULL when unset)
+@@ -42,7 +44,7 @@ static inline hq_phase hq_step(home_quit *q, double now, int home, int a, int b)
+         if (pressed) { q->phase = HQ_HOLDING; q->since = now; }
+         break;
+     case HQ_HOLDING:
+-        if (!home) q->phase = HQ_IDLE;   // let go too early
++        if (!home) { q->phase = HQ_IDLE; if (now - q->since < HQ_TAP_S) q->tapped = 1; }   // let go too early (a quick tap: Slingshot's menu)
+         else if (now - q->since >= HQ_HOLD_S) { q->phase = HQ_PROMPT; q->a_up = !a; q->b_up = !b; }
+         break;
+     case HQ_PROMPT:
+diff --git a/dm/mac/pack_app.py b/dm/mac/pack_app.py
+old mode 100755
+new mode 100644
+index e8ae665e..36e248f0
+--- a/dm/mac/pack_app.py
++++ b/dm/mac/pack_app.py
+@@ -127,6 +127,7 @@ def info_plist(a, minos, icon):
+          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
+          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
+          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
++         'NSMicrophoneUsageDescription': 'Voice chat with the other players, when a co-op mod uses it.',   # (Slingshot: Squadala!'s voice, dm/slingshot/src/coop/voice.c)
+          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
+     if icon: p['CFBundleIconFile'] = 'AppIcon'
+     if a.settings:
+diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
+index b30b5685..1af8cacb 100644
+--- a/dm/tools/patch_nso.py
++++ b/dm/tools/patch_nso.py
+@@ -1443,7 +1443,8 @@ if BUILD_ID in STUBS or STUB_MATCH:
+                               put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if STUB_MATCH else ''), 'stub'),
+                               address=lambda off, lo_off=None: stub_address(off, 'stub', lo_off),
+                               base=STUB_MATCH[1] if STUB_MATCH else 0, others=STUB_MATCH[2] if STUB_MATCH else {},
+-                              found=STUB_MATCH[3] if STUB_MATCH else None, fps_ready=False)
++                              found=STUB_MATCH[3] if STUB_MATCH else None, fps_ready=False,
++                              state=FS_STATE_OFF)   # the frame step state page (0: none), which a stub may read host addresses from (the co-op wraps' entry, dm/slingshot/src/coop/bridge.c)
+     (STUB_MATCH[0]['stub'] if STUB_MATCH else STUBS[BUILD_ID])(st)
+     if st.fps_ready: NATIVE_FPS_BLOCKED = False
+ if NATIVE_FPS_BLOCKED: print(f'[RED] {NAME}: native frame target disabled: a required timing correction did not match')
