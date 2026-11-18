@@ -519,12 +519,18 @@ static void smc_overlay_tick(void) {
         NSView *cv = g_win.contentView;
         SmcOverlayView *v = [[SmcOverlayView alloc] initWithFrame:cv.bounds];
         v.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; v.wantsLayer = YES; v.layer.opaque = NO;
+        v.layer.drawsAsynchronously = YES;   // (the drawing's commands run off the main thread)
+        v.hidden = YES;                      // (shown only while the module draws: a hidden layer is not composited over the game's)
         if (g_sm_view) [cv addSubview:v positioned:NSWindowBelow relativeTo:g_sm_view]; else if (g_sm_fps) [cv addSubview:v positioned:NSWindowBelow relativeTo:g_sm_fps]; else [cv addSubview:v];
         g_smc_overlay = v;
         LOG("slingshot: Squadala!'s drawing over the picture on (%s)", g_smc_draw2 ? "the game look" : "plain");
     }
+    // Redrawn 30 times a second only while the module has something to draw. With nothing (no chat lines, no name tags in sight) the view is hidden, so the
+    // window server puts the game's picture on screen alone again: a transparent layer over it costs a composite of the whole window each frame
     int want = g_smc_draw_wanted() != 0;
-    if (want || g_smc_drew) g_smc_overlay.needsDisplay = YES;
+    if (want) { if (g_smc_overlay.hidden) g_smc_overlay.hidden = NO; g_smc_overlay.needsDisplay = YES; }
+    else if (g_smc_drew) g_smc_overlay.needsDisplay = YES;   // (once more, to clear what was drawn)
+    else if (!g_smc_overlay.hidden) g_smc_overlay.hidden = YES;
     g_smc_drew = want;
 }
 
@@ -575,7 +581,11 @@ static NSEvent *smc_play_mouse(NSEvent *e) {
     NSView *cv = g_win.contentView; NSPoint p = [cv convertPoint:e.locationInWindow fromView:nil]; NSSize z = cv.bounds.size;
     if (z.width <= 0 || z.height <= 0 || !NSPointInRect(p, cv.bounds)) return e;
     float fx = (float)(p.x / z.width), fy = (float)(1 - p.y / z.height);   // (AppKit's origin is at the bottom left; the module's at the top left)
-    if (t == NSEventTypeMouseMoved || t == NSEventTypeLeftMouseDragged) { g_smc_m.mouse(fx, fy, 0); return e; }
+    if (t == NSEventTypeMouseMoved || t == NSEventTypeLeftMouseDragged) {   // (at most 120 a second: a trackpad sends far more, each one on the main thread)
+        static double last; const double at = e.timestamp;
+        if (at - last >= 1.0 / 120 || at < last) { last = at; g_smc_m.mouse(fx, fy, 0); }
+        return e;
+    }
     if (t == NSEventTypeLeftMouseDown) { if (g_smc_m.mouse(fx, fy, 1)) { g_smc_mouse_held = 1; g_smc_overlay.needsDisplay = YES; return nil; } return e; }
     if (t == NSEventTypeScrollWheel && e.scrollingDeltaY != 0) {
         if (g_smc_m.mouse(fx, fy, e.scrollingDeltaY > 0 ? 2 : 3)) { g_smc_overlay.needsDisplay = YES; return nil; }

@@ -1,5 +1,5 @@
 diff --git a/dm/games/0400486024DEC000/patches.py b/dm/games/0400486024DEC000/patches.py
-index 2e7727a0..f0e660e9 100644
+index 2e7727a..8ab59bf 100644
 --- a/dm/games/0400486024DEC000/patches.py
 +++ b/dm/games/0400486024DEC000/patches.py
 @@ -1,6 +1,6 @@
@@ -10,7 +10,7 @@ index 2e7727a0..f0e660e9 100644
  
  # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
  # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
-@@ -104,6 +104,101 @@ movie_cap = 'movie update cap: 3 pictures a frame, the frame step\'s largest hol
+@@ -104,6 +104,106 @@ movie_cap = 'movie update cap: 3 pictures a frame, the frame step\'s largest hol
  # sets the frame to the pictures the player has taken (the player's +0xc: its update adds what it advances each frame; reset when a movie starts, as +0x2f8 is), so the
  # timeline follows the picture whatever the frame takes. The player is the object at +0x10, already read by both draws (main+0x3b5ce80 on it) just before.
  movie_frame = 'movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn'
@@ -46,6 +46,11 @@ index 2e7727a0..f0e660e9 100644
 +    (0x3406940, OBS_COOP | 15 << 8, 'f9401660', "co-op title: its set-up (slot 93) with its buttons made (x19 the screen; ldr x0, [x19, #0x28]): HOS_COOP_TITLE_SETUP"),
 +    (0x3406d74, OBS_COOP | 16 << 8, '7100051f', "co-op title: its active step (slot 96) after its first instruction (x0 the screen; cmp w8, #1): HOS_COOP_TITLE_STEP"),
 +    (0x34067b0, OBS_COOP | 17 << 8, 'aa0003f3', "co-op title: its deleting destructor (x0 the screen; mov x19, x0): HOS_COOP_TITLE_GONE"),
++    # The game's menus and camera (Longshot's patches 0018 and 0019, slingshot/src/coop/menus.c): where Longshot's host is called in its lift
++    # (nx2/oot_patches.py patch_menu_tick, patch_menu_focus, patch_view), each at the first instruction after it that a gate can carry
++    (0x2d1384, OBS_COOP | 18 << 8, 'fc180fea', "co-op menus: every menu screen's update f_802f1380 after its pacibsp (x0 the screen; str d10, [sp, #-0x80]!): the screens"),
++    (0x2cd664, OBS_COOP | 19 << 8, 'd10203ff', "co-op menus: the pause menu's pane-focus handler f_802ed660 after its pacibsp (x0 the screen; sub sp, sp, #0x80)"),
++    (0x4c5068, OBS_COOP | 20 << 8, 'f9401268', "co-op camera: the view routine f_804e48c0's loop head (x20 the view; ldr x8, [x19, #0x20]): the Customize page's camera"),
 +]}
 +def coop_puppet_guard(ctx):
 +    here, emit = ctx.here, ctx.emit
@@ -112,7 +117,7 @@ index 2e7727a0..f0e660e9 100644
  MATCH_CUTS = {'main': [
      {'name': movie_pictures, 'size': 828, 'fingerprints': ['f61ad468b6b4e1d574fe8678f5a12dfc60e1aab71be7375142a4b48b0d73ce19'],   # v131072 main+0x3b5cec0
       'cuts': [(452, '88b79c1a', '48008052', movie_pictures + ' (cinc w8, w28, ge → mov w8, #2; as v131072 main+0x3b5d084)')]},
-@@ -118,6 +213,12 @@ MATCH_CUTS = {'main': [
+@@ -118,6 +218,12 @@ MATCH_CUTS = {'main': [
  ]}
  
  BINDING = [
@@ -126,7 +131,7 @@ index 2e7727a0..f0e660e9 100644
       'why': "the game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main",
       'checked': 'v131072 main: one function with this fingerprint, the constructor, its one caller, the update and the advance read by disassembly; the limit and the count read in play with DM_PROBE, the opening movie timed at a 30 fps frame step without and with the cut (2026-11-12)'},
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index ffb86725..cfe32b65 100644
+index ffb8672..cfe32b6 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
 @@ -617,7 +617,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
@@ -151,7 +156,7 @@ index ffb86725..cfe32b65 100644
  NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
  NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 44229b14..5eb97b6b 100644
+index 44229b1..5eb97b6 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -3807,7 +3807,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
@@ -238,7 +243,7 @@ index 44229b14..5eb97b6b 100644
          if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
          MLOG("[bootprof] t=%.3f s present #%llu: metallibs loaded %llu / %.1f ms; pipelines created %llu / %.1f ms (all synchronous on the submit thread); prewarmed and used: shaders %llu / render pipelines %llu / compute pipelines %llu; "
 diff --git a/dm/gfx/nvn/nvn_obj.h b/dm/gfx/nvn/nvn_obj.h
-index bf56444e..e24cda15 100644
+index bf56444..e24cda1 100644
 --- a/dm/gfx/nvn/nvn_obj.h
 +++ b/dm/gfx/nvn/nvn_obj.h
 @@ -355,6 +355,11 @@ void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool fin
@@ -254,7 +259,7 @@ index bf56444e..e24cda15 100644
  void mtl_tex_gpu_written(const tex_t *t);   // a GPU write into the texture's storage is recorded: uncompressed textures over it are no longer taken from storage (tex_cpu_content)
  int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
 diff --git a/dm/host/Makefile b/dm/host/Makefile
-index 894bbd18..9f1457a5 100644
+index 894bbd1..9f1457a 100644
 --- a/dm/host/Makefile
 +++ b/dm/host/Makefile
 @@ -75,13 +75,17 @@ FORCE:
@@ -292,7 +297,7 @@ index 894bbd18..9f1457a5 100644
  	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
  	dsymutil $@
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index 70051dcd..dfe87041 100644
+index 70051dc..dfe8704 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
 @@ -135,7 +135,8 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
@@ -306,7 +311,7 @@ index 70051dcd..dfe87041 100644
  // effect when the gate returns (entry.S restores them from the frame), which OBS_STDALLOC_INIT and OBS_UE_REGION do
  void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
-index 5962d159..02b87193 100644
+index 5962d15..02b8719 100644
 --- a/dm/host/front_mac.m
 +++ b/dm/host/front_mac.m
 @@ -165,6 +165,9 @@ static int fn_shortcut(NSEvent *e) {
@@ -428,7 +433,7 @@ index 5962d159..02b87193 100644
          [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
          [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
 diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
-index 881bbc7e..fe312154 100644
+index 881bbc7..fe31215 100644
 --- a/dm/host/hle_audren.c
 +++ b/dm/host/hle_audren.c
 @@ -347,6 +347,7 @@ static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out, int
@@ -456,7 +461,7 @@ index 881bbc7e..fe312154 100644
              for (uint32_t s = 0; s < nout * DM_AUDIO_SINK_CHANNELS; s++) {
                  int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
-index befbfaaf..4cf9e1c5 100644
+index befbfaa..4cf9e1c 100644
 --- a/dm/host/hle_fs.c
 +++ b/dm/host/hle_fs.c
 @@ -54,6 +54,7 @@ typedef struct {
@@ -624,7 +629,7 @@ index befbfaaf..4cf9e1c5 100644
        for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
        atomic_store(&g_ftxn[fd], token); }
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index cc3b61e4..9623b372 100644
+index cc3b61e..9623b37 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -560,6 +560,10 @@ static void rec_start(void) {
@@ -658,7 +663,7 @@ index cc3b61e4..9623b372 100644
  }
  // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
 diff --git a/dm/host/home_quit.h b/dm/host/home_quit.h
-index 64b6b9de..119223ee 100644
+index 64b6b9d..119223e 100644
 --- a/dm/host/home_quit.h
 +++ b/dm/host/home_quit.h
 @@ -14,6 +14,7 @@
@@ -689,7 +694,7 @@ index 64b6b9de..119223ee 100644
 diff --git a/dm/mac/pack_app.py b/dm/mac/pack_app.py
 old mode 100755
 new mode 100644
-index e8ae665e..36e248f0
+index e8ae665..36e248f
 --- a/dm/mac/pack_app.py
 +++ b/dm/mac/pack_app.py
 @@ -127,6 +127,7 @@ def info_plist(a, minos, icon):
@@ -701,7 +706,7 @@ index e8ae665e..36e248f0
      if icon: p['CFBundleIconFile'] = 'AppIcon'
      if a.settings:
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index b30b5685..1af8cacb 100644
+index b30b568..1af8cac 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -1443,7 +1443,8 @@ if BUILD_ID in STUBS or STUB_MATCH:

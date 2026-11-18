@@ -20,6 +20,8 @@ On Windows and Linux, Squadala! patches Longshot, the PC build. Slingshot gives 
   - A wrapped function's phases run on a big host stack, because game threads can have small stacks.
 - **Exports of the app** that the module finds by name, as on Linux: texture overrides, save folders and the save slot, and SDL's clipboard and modifier calls.
 - **The front end** (`src/squadala.h`): the menu tabs, the drawing over the picture (chat, name tags, player list), keys, typing and the mouse in play.
+- **The game's menus and camera** (`src/coop/menus.c`): three more gates, where Longshot calls its own host code in its lift. They are every menu screen's update, the pause menu's focus handler, and the head of the view routine's loop. From them Slingshot keeps which menu screens run, as Longshot's `host/oot_menu.c` does: the HUD screen, the panel's frame, whether the Map page is shown, and whether a game menu is in front. It exports that to the module as `hos_coop_menu_state`, and runs the HUD's own refresh when the module asks for it. The gameplay camera goes to the module's `hos_coop_view` first, for the Customize page's turn around your Link.
+- **Game addresses.** A few of the module's features (the title screen's rows, the Map page) were written with Longshot's fixed game addresses. `patches/squadala-macos.patch` takes them from where the game is loaded instead, which is the same address on Longshot.
 
 ## Parity with Longshot's co-op patches
 
@@ -39,8 +41,8 @@ On Windows and Linux, Squadala! patches Longshot, the PC build. Slingshot gives 
 | 0015 pad select | Which controller this game uses (two games on one computer) | Not yet |
 | 0016 local pads | Split-screen players 2–4 (not in a Squadala! release yet) | Not yet |
 | 0017 player input | Player's pad reads wrapped | Done |
-| 0018 map state | Players on the Map page; minimap icons behind menus; HUD refresh | Not yet: needs the game's menu screens found in its code |
-| 0019 menu picture / view | The Customize page's Link picture and its camera | Picture done; the camera (`hos_coop_view`) not yet |
+| 0018 map state | Players on the Map page; minimap icons behind menus; HUD refresh | Done (`src/coop/menus.c`, from Longshot's `host/oot_menu.c`) |
+| 0019 menu picture / view | The Customize page's Link picture and its camera | Done (the camera: `src/coop/menus.c`, from Longshot's `hos_oot_free_view`) |
 | 0020 texture overrides | Your own Link's tunic and gear colours | Done |
 | 0022 typing | Keyboard to the module's text fields | Done (⌘V pastes) |
 | 0024 save-load wraps | Every save load to the module | Done |

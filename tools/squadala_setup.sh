@@ -4,7 +4,7 @@
 # Run once, and again when the pins below move to a new Squadala! release:
 #   bash dm/slingshot/tools/squadala_setup.sh [<game romfs>] [--pack]
 # 1. Squadala! v0.11.4 (its tag's commit, checked) into ~/OcarinaNative/src, with Slingshot's macOS changes (dm/slingshot/patches/squadala-macos.patch: the .dylib
-#    build, the Mac's clipboard, two small compile fixes), built into ~/Library/Application Support/Slingshot/coop/hookshot_coop.dylib: the module
+#    build, the Mac's clipboard, two small compile fixes, the title's and Map page's Longshot addresses from main's base), built into ~/Library/Application Support/Slingshot/coop/hookshot_coop.dylib: the module
 #    the PC kit's Longshot loads, which Slingshot loads with the game when it is there (dm/slingshot/src/coop/bridge.c). SQUADALA_SRC: another source tree, as is.
 # 2. OOTRR v0.6.2, the randomizer Squadala! 0.11.4 runs (its hookshot/OOTRR.txt), from its tag (commit checked), built with cargo as OOTRR's own
 #    release builds do (--release --locked), into coop/tools/ootrr, where the module finds it. Its Mods tab builds seeds with it exactly as on Windows
@@ -50,8 +50,11 @@ else
     say "Squadala! $SQ_TAG"
     SRC=$SRCDIR/squadala-$SQ_TAG
     fetch "$SQ_URL" "$SQ_TAG" "$SQ_COMMIT" "$SRC"
-    if git -C "$SRC" apply --check "$here/dm/slingshot/patches/squadala-macos.patch" 2>/dev/null; then git -C "$SRC" apply "$here/dm/slingshot/patches/squadala-macos.patch"
-    elif ! git -C "$SRC" apply -R --check "$here/dm/slingshot/patches/squadala-macos.patch" 2>/dev/null; then echo "$SRC: the macOS changes do not apply"; exit 1; fi
+    PATCH=$here/dm/slingshot/patches/squadala-macos.patch
+    if ! git -C "$SRC" apply -R --check "$PATCH" 2>/dev/null; then   # (not in as it is now: the tag's own files again, then the changes; an older setup's are replaced)
+        git -C "$SRC" checkout -q "$SQ_COMMIT" -- $(sed -n 's#^+++ b/##p' "$PATCH")
+        git -C "$SRC" apply "$PATCH" || { echo "$SRC: the macOS changes do not apply"; exit 1; }
+    fi
 fi
 say 'Building the Squadala! module for macOS'
 cmake -S "$SRC" -B "$SRC/build-mac" -DCMAKE_BUILD_TYPE=Release -DCOOP_BUILD_HOOKSHOT=ON -DCOOP_BUILD_TESTS=OFF -DCOOP_BUILD_PROGRAMS=OFF >/dev/null

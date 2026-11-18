@@ -68,6 +68,7 @@ Slingshot keeps its files in `~/Library/Application Support/Slingshot`:
 | `src/coop/call.S` | The bridge's assembly: game calls on the game's stack, memory probes, the entry of wrapped game functions. |
 | `src/coop/textures.c` | Texture overrides, so your Link's colours change live. |
 | `src/coop/voice.c` | Voice chat: the microphone, libopus and the game's mix, handed to the module. |
+| `src/coop/menus.c` | The game's menus and camera for the module: which menu screens run (other players on the Map page, the minimap's icons hidden behind menus) and the Customize page's camera around your Link. Ported from Longshot's own code. |
 | `src/third_party/zstd` | The decoding half of zstd 1.5.7 (BSD), used to read size tables. |
 | `tools/install.sh` | Applies Slingshot's hooks to an nxnative checkout. |
 | `tools/make_patch.sh` | For developers: writes `patches/nxnative.patch` again from your nxnative checkout. |
@@ -76,7 +77,7 @@ Slingshot keeps its files in `~/Library/Application Support/Slingshot`:
 | `tools/mods_table.py` | Link Skins' size-table rules as a script, for checking `size_table.c`. Both make the same table. |
 | `tools/ui_assets.py` | Makes the menu's look and the app icon from your own game files. |
 | `patches/nxnative.patch` | Slingshot's small hooks in nxnative's own files (listed below). |
-| `patches/squadala-macos.patch` | Slingshot's small macOS changes to Squadala!'s source (the setup applies them): a `.dylib` build, the Mac clipboard, two compile fixes, and SDL calls that Slingshot answers. |
+| `patches/squadala-macos.patch` | Slingshot's small macOS changes to Squadala!'s source (the setup applies them): a `.dylib` build, the Mac clipboard, two compile fixes, SDL calls that Slingshot answers, and the title screen's and Map page's game addresses taken from where the game is loaded. |
 | `docs/squadala.md` | How Squadala! runs on the Mac, and how each Longshot co-op patch maps to Slingshot. |
 
 ## Hooks in nxnative's own files
@@ -96,7 +97,7 @@ Each hook is commented where it is. `patches/nxnative.patch` holds them all.
 | `dm/gfx/nvn/nvn_mtl.m` | Calls co-op at each present, draws an overridden texture with its overrides, and hands the game's camera to Squadala!'s name tags. |
 | `dm/mac/pack_app.py` | The microphone line in the app's Info.plist, for voice chat. |
 | `dm/tools/patch_nso.py` | Gives a game's stub code the frame-step state page, where the wrapped functions find the bridge. |
-| `dm/games/0400486024DEC000/patches.py` | The game's co-op hooks: observation gates, the puppet guard and the wrapped functions. Each is checked against the game's own instructions. |
+| `dm/games/0400486024DEC000/patches.py` | The game's co-op hooks: observation gates (frame, world events, title screen, menu screens, camera), the puppet guard and the wrapped functions. Each is checked against the game's own instructions. |
 
 ## Troubleshooting
 
@@ -113,6 +114,7 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`, and the run before it
 | `coop: no co-op module at …: co-op off` | Squadala! is not installed. Run `tools/squadala_setup.sh`. |
 | `coop: world hooks on (level 4): 6 events, 14 wrapped game functions` | All of co-op's game hooks are in. |
 | `coop voice: on …`, or `coop voice: [RED] no libopus …` | Voice chat is ready, or Opus is missing (run the setup again). |
+| `coop: title: the title's own rows … their texts could not be set` | The title screen's Multiplayer rows have no text. Run `tools/squadala_setup.sh` again, so the module is built with the current macOS patch. |
 | `coop: … this Longshot has no …` | Slingshot does not have that feature yet. `docs/squadala.md` says which features are missing. |
 
 `SLINGSHOT_COOP=0` starts the game without Squadala!. `HOS_COOP_NULL_READS=0` turns off co-op's null-read handling, to rule it out when the game crashes. `HOS_COOP_VOICE=0` keeps voice chat off.

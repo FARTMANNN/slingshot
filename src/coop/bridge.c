@@ -10,7 +10,8 @@
 //   the frame function in moduleCalc_ (sites 0 and 1, just before their mov x0, x20, which Longshot's hook follows: the same point for
 //   the module), the AI hold (site 8: after the blr x8 that answers a BSA component its calc bits in w0, which the module may change),
 //   the world events of co-op's Longshot patches 0003/0005/0007 (sites 9..14: hos_coop_world events, the same numbers and values), and the title
-//   screen's three points (sites 15..17, patch 0004: hos_coop_title, the Multiplayer rows on it).
+//   screen's three points (sites 15..17, patch 0004: hos_coop_title, the Multiplayer rows on it), and the game's menus and camera (sites
+//   18..20, patches 0018 and 0019: menu screens, the pause menu, the gameplay view; slingshot/src/coop/menus.c).
 //   The puppet guard is a stub in the same file (STUBS), and so are the wrapped game functions (patches 0005, 0013, 0014, 0017, 0024):
 //   once the module is on, the bridge writes slingshot/src/coop/call.S's wrap entry into the frame step state page (+0xc00), where the wrap stubs look,
 //   and the module's hos_coop_wrap sees every call of those functions before and after (phase 0 may skip it), as on Longshot.
@@ -55,7 +56,8 @@ _Static_assert(sizeof(coop_api_t) == 96, "HosCoopApi (version 1, up to scratch)"
 
 enum { SITE_RARE = 0, SITE_FRAME = 1, SITE_PRESENT = 2, SITE_HOLD = 8,   // patches.py's OBS parameters (0..2 are hos_coop_api.h's sites)
        SITE_COUNTER = 9, SITE_CREATE = 10, SITE_DELETE = 11, SITE_LIFE = 12, SITE_LIFE_STOPS = 13, SITE_SHOOT = 14,
-       SITE_TITLE_SETUP = 15, SITE_TITLE_STEP = 16, SITE_TITLE_GONE = 17 };   // the title screen (Longshot's patch 0004): hos_coop_title's events 1, 2, 0
+       SITE_TITLE_SETUP = 15, SITE_TITLE_STEP = 16, SITE_TITLE_GONE = 17,     // the title screen (Longshot's patch 0004): hos_coop_title's events 1, 2, 0
+       SITE_MENU_TICK = 18, SITE_PAUSE_FOCUS = 19, SITE_VIEW = 20 };          // the game's menus and camera (Longshot's 0018 and 0019): menus.c
 // hos_coop_world.h / hos_coop_actors.h: the events and the hooks' level
 enum { W_HELLO = 0, W_COUNTER_START = 1, W_CREATE_REQUEST = 2, W_DELETE_REQUEST = 3, W_LIFE_STEP = 4, W_CREATE_FROM = 5, W_CREATE_STOP = 6,
        W_SHOOT_FROM = 7, W_LIFE_STOPS = 8, W_VERSION = 4 };
@@ -267,6 +269,7 @@ void coop_bridge_stop(void) {
     }
 }
 void coop_voice_init(void);   // voice.c
+void coop_menus_obs(uint64_t *regs, int which);   // menus.c
 static void coop_load(void) {
     atomic_store(&g_state, -1);
     const char *off = getenv("SLINGSHOT_COOP");
@@ -339,6 +342,10 @@ static void coop_obs(uint64_t *regs, int param) {
         m_title(&c, regs[reg[param - SITE_TITLE_SETUP]], event[param - SITE_TITLE_SETUP]);
         return;
     }
+    if (param >= SITE_MENU_TICK && param <= SITE_VIEW) {   // the menus' screens, the pause menu, the gameplay view (menus.c), once the module is on
+        if (atomic_load_explicit(&g_state, memory_order_acquire) == 1) coop_menus_obs(regs, param - SITE_MENU_TICK);
+        return;
+    }
     if (param >= SITE_COUNTER) { world_event(regs, param); return; }
     if (atomic_load_explicit(&g_state, memory_order_acquire) == 0) coop_load();   // the first frame hook, on the game's calc thread
     if (atomic_load_explicit(&g_state, memory_order_acquire) != 1) return;
@@ -346,6 +353,14 @@ static void coop_obs(uint64_t *regs, int param) {
     m_frame(&c, param);
 }
 void coop_bridge_init(void) { gate_obs_set(OBS_COOP, coop_obs); }
+// For menus.c (the game's menus and camera): main's base, a fault-safe read, and a game function called from a gate's registers (x0 one argument)
+uint64_t coop_bridge_main(void) { return g_text_lo; }
+int coop_bridge_peek(uint64_t a, void *out, size_t n) { return coop_read(a, out, n); }
+int coop_bridge_game_call(uint64_t *regs, uint64_t fn, uint64_t x0) {
+    coop_ctx_t c = {.regs = regs}; coop_call_t k = {0}; uint64_t r = 0;
+    k.function = fn, k.x[0] = x0;
+    return coop_call(&c, &k, &r);
+}
 // For the front end (slingshot/src/squadala.h: the Squadala! pages in Slingshot's menu, which draw the module's own tabs): the module's state
 // (0 not loaded yet, 1 on, -1 off: not there, refused or stopped) and its exports, found by name, only while it is on
 int coop_bridge_state(void) { return atomic_load_explicit(&g_state, memory_order_acquire); }
