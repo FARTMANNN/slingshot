@@ -116,6 +116,12 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`, and the run before it
 | `coop voice: on …`, or `coop voice: [RED] no libopus …` | Voice chat is ready, or Opus is missing (run the setup again). |
 | `coop: title: the title's own rows … their texts could not be set` | The title screen's Multiplayer rows have no text. Run `tools/squadala_setup.sh` again, so the module is built with the current macOS patch. |
 | `coop: … this Longshot has no …` | Slingshot does not have that feature yet. `docs/squadala.md` says which features are missing. |
+| `coop: Hookshot hands co-op the game's camera (… scene): name tags on` | The other players' name tags have the game's camera. |
+| `slingshot: power: …, Low Power Mode on …` or `thermal state serious` | macOS is slowing the chip down. The game can't hold 60 fps until you plug in, turn Low Power Mode off, or let the Mac cool. The menu's Graphics page shows the same under Power. |
+| `coop: cost over N presents: …` | What co-op takes each frame, every 10 s: its main work on its own thread (p50, p95, max), then what its hooks take on the game's threads. Attach these lines to a frame-rate report. |
+| `slingshot: Squadala!'s overlay over the last 10 s: up N% …` | How often the drawing over the picture (chat, name tags, map marks) was up. |
+
+**Low frame rate?** Check these first: the Power row on the menu's Graphics page (Low Power Mode or heat), a window instead of full screen (the Display row), and handheld instead of docked. The `[nvn] frame step` lines say when and why the game dropped to 30 or 20 fps: `GPU 1.6` means the GPU took 1.6 frames of time, and a `cost` far above the `GPU` figure means the CPU side was slow.
 
 `SLINGSHOT_COOP=0` starts the game without Squadala!. `HOS_COOP_NULL_READS=0` turns off co-op's null-read handling, to rule it out when the game crashes. `HOS_COOP_VOICE=0` keeps voice chat off.
 

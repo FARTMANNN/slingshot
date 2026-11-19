@@ -17,7 +17,11 @@
 //   and the module's hos_coop_wrap sees every call of those functions before and after (phase 0 may skip it), as on Longshot.
 // - The world hello: once the module is on, the bridge tells it the hooks' level (hos_coop_world.h version 4) and which wraps this build
 //   has (each wrap's first instruction a branch to its stub), as Longshot's bridge does at its first hooked event.
-// - The present (nvn_mtl.m dm_present_hook): the module's frame at HOS_COOP_SITE_PRESENT (2), once per picture, loads and pause too.
+// - The present (nvn_mtl.m dm_present_hook): the module's frame at HOS_COOP_SITE_PRESENT (2), once per picture, loads and pause too. That is co-op's
+//   main work (its OnFrame: the players, the actors, the network), so it runs on a thread of its own, woken by each present: nvn_mtl.m calls the hook on
+//   the display link's thread, just before the picture goes up, where any time it takes makes the picture late (Longshot calls it in the game's own
+//   nvnQueuePresentTexture, which has no such deadline). Presents that come while it still works are done by its next run.
+// - The cost: what co-op's calls take, by kind, logged every 10 s ("coop: cost"), for frame-rate reports.
 // - Game calls (the table's call): a gate's callback runs on the thread's gate stack, where nxnative never runs the game's code: an SVC
 //   the game makes would enter the gate again over the frame below it (entry.S). So a call runs on the game's own stack, below the gate
 //   block's frame, and while it runs the thread's gate stack top (dm_gate_top) moves below this frame, so the call's own SVCs get a gate
@@ -28,7 +32,9 @@
 //   1 MB gives 0 here (the fault hook decodes it, writes 0 to its registers and steps over it), from the module's start on
 //   (HOS_COOP_NULL_READS=0: they fault as before). A write still faults.
 #include "../../../host/dm.h"
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -94,6 +100,21 @@ static uint64_t g_wrap_mask;                   // the wraps this build has (bit 
 static coop_api_t g_api;
 static char g_dir[1024], g_build[33];
 static uint64_t g_text_lo, g_text_hi;          // main's code: what call() may call
+
+// ---- The cost: time in co-op's calls, by kind, summed in 16 slots (a thread's own, by its id: the game's worker threads call at once) ----
+enum { COST_FRAME, COST_HOLD, COST_WORLD, COST_WRAP, COST_MENUS, COST_TITLE, COST_KINDS };
+static const char *const k_cost_name[COST_KINDS] = {"frame hook", "held components", "world events", "wrapped game functions", "menus and view", "title"};
+typedef struct { _Atomic uint64_t t[COST_KINDS], n[COST_KINDS]; } __attribute__((aligned(128))) cost_slot_t;
+static cost_slot_t g_cost[16];
+static __thread int t_cost_slot = -1;
+static inline uint64_t cost_now(void) { return mach_absolute_time(); }
+static inline void cost_add(int kind, uint64_t t0) {
+    if (t_cost_slot < 0) { uint64_t id = 0; pthread_threadid_np(NULL, &id); t_cost_slot = (int)(id % 16); }
+    cost_slot_t *c = &g_cost[t_cost_slot];
+    atomic_fetch_add_explicit(&c->t[kind], cost_now() - t0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&c->n[kind], 1, memory_order_relaxed);
+}
+static double cost_ms(uint64_t ticks) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return (double)ticks * tb.numer / tb.denom / 1e6; }
 
 // ---- The table ----
 static int coop_read(uint64_t a, void *out, size_t n) { return !n || (a >= 0x1000 && a + n > a && coop_probe_copy(out, (const void *)(uintptr_t)a, n)); }
@@ -245,16 +266,78 @@ static __thread int t_wraps;
 int coop_wrap_before(uint32_t id, uint64_t *x) {
     if (t_wraps >= WRAP_DEPTH) die("co-op: wrapped game functions nested more than %d deep", WRAP_DEPTH);
     t_wrap[t_wraps++] = (wrap_rec_t){x[30], id};
-    return atomic_load_explicit(&g_world, memory_order_acquire) && m_wrap ? m_wrap(id, 0, x, NULL) : 0;
+    if (!atomic_load_explicit(&g_world, memory_order_acquire) || !m_wrap) return 0;
+    const uint64_t t0 = cost_now();
+    const int r = m_wrap(id, 0, x, NULL);
+    cost_add(COST_WRAP, t0);
+    return r;
 }
 uint64_t coop_wrap_after(uint64_t *x) {
     if (t_wraps <= 0) die("co-op: a wrapped game function returned without its entry");
     const wrap_rec_t r = t_wrap[--t_wraps];
     x[30] = r.lr;
-    if (atomic_load_explicit(&g_world, memory_order_acquire) && m_wrap) m_wrap(r.id, 1, x, NULL);
+    if (atomic_load_explicit(&g_world, memory_order_acquire) && m_wrap) { const uint64_t t0 = cost_now(); m_wrap(r.id, 1, x, NULL); cost_add(COST_WRAP, t0); }
     return r.lr;
 }
-static void coop_present(void) { if (atomic_load_explicit(&g_state, memory_order_acquire) == 1) m_frame(NULL, SITE_PRESENT); }
+// The present's work on its own thread (see the top): each present wakes it, and one run does every present that came since the last
+static dispatch_semaphore_t g_present_wake;
+static _Atomic uint64_t g_presents;            // presents so far (the hook's count)
+static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;   // held while the module's present work runs (the stop waits for it)
+static void coop_present(void) { atomic_fetch_add_explicit(&g_presents, 1, memory_order_relaxed); dispatch_semaphore_signal(g_present_wake); }
+static int cmp_u64(const void *a, const void *b) { const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+// Every 10 s: the present work's time a run (p50, p95, max) and the other kinds' time a present, from the slots
+static uint64_t cost_ticks(double ms) { return (uint64_t)(ms * 1e6 / cost_ms(1000000)); }
+static void cost_report(const uint64_t *runs, int nruns, uint64_t presents, uint64_t skipped) {
+    static uint64_t was_t[COST_KINDS], was_n[COST_KINDS];
+    uint64_t sorted[600]; memcpy(sorted, runs, (size_t)nruns * sizeof *runs); qsort(sorted, (size_t)nruns, sizeof *sorted, cmp_u64);
+    if (!presents) presents = 1;
+    char line[1024]; int k = snprintf(line, sizeof line, "coop: cost over %llu presents: present work (its own thread) p50 %.2f ms, p95 %.2f, max %.2f",
+                                      (unsigned long long)presents, cost_ms(sorted[nruns / 2]), cost_ms(sorted[nruns * 95 / 100]), cost_ms(sorted[nruns - 1]));
+    if (skipped) k += snprintf(line + k, sizeof line - (size_t)k, " (%llu presents came while it ran)", (unsigned long long)skipped);
+    k += snprintf(line + k, sizeof line - (size_t)k, "; a present on the game's threads:");
+    const int head = k;
+    for (int i = 0; i < COST_KINDS; i++) {
+        uint64_t t = 0, n = 0;
+        for (int j = 0; j < 16; j++) t += atomic_load_explicit(&g_cost[j].t[i], memory_order_relaxed), n += atomic_load_explicit(&g_cost[j].n[i], memory_order_relaxed);
+        if (n != was_n[i] && k < (int)sizeof line - 100)
+            k += snprintf(line + k, sizeof line - (size_t)k, "%s %s %.3f ms (%.1f calls)", k > head ? "," : "", k_cost_name[i],
+                          cost_ms(t - was_t[i]) / (double)presents, (double)(n - was_n[i]) / (double)presents);
+        was_t[i] = t, was_n[i] = n;
+    }
+    if (k == head) snprintf(line + k, sizeof line - (size_t)k, " none");
+    LOG("%s", line);
+}
+static void *present_worker(void *arg) {
+    (void)arg;
+    pthread_setname_np("slingshot-coop-present");
+    uint64_t done = 0, skipped = 0, from = 0, runs[600]; int nruns = 0;
+    uint64_t next = cost_now() + cost_ticks(10000);
+    for (;;) {
+        dispatch_semaphore_wait(g_present_wake, DISPATCH_TIME_FOREVER);
+        const uint64_t want = atomic_load_explicit(&g_presents, memory_order_relaxed);
+        if (want == done) continue;   // (a wake for presents an earlier run did)
+        if (done && want - done > 1) skipped += want - done - 1;
+        done = want;
+        pthread_mutex_lock(&g_present_mu);
+        if (atomic_load_explicit(&g_state, memory_order_acquire) != 1) { pthread_mutex_unlock(&g_present_mu); continue; }
+        const uint64_t t0 = cost_now();
+        m_frame(NULL, SITE_PRESENT);
+        const uint64_t t1 = cost_now();
+        pthread_mutex_unlock(&g_present_mu);
+        if (!from) from = done - 1;
+        if (nruns < 600) runs[nruns++] = t1 - t0;
+        if (t1 >= next) { cost_report(runs, nruns, done - from, skipped); nruns = 0, skipped = 0, from = done; next = t1 + cost_ticks(10000); }
+    }
+    return NULL;
+}
+static void present_worker_start(void) {
+    g_present_wake = dispatch_semaphore_create(0);
+    pthread_attr_t a; pthread_attr_init(&a);
+    pthread_attr_set_qos_class_np(&a, QOS_CLASS_USER_INITIATED, 0);   // (below the game's own threads, which are user-interactive)
+    pthread_t t;
+    if (pthread_create(&t, &a, present_worker, NULL)) die("co-op: the present work's thread did not start");
+    pthread_attr_destroy(&a);
+}
 
 // ---- The module ----
 // The module's own stop (it leaves the session and ends its threads), once, from the front end when the app quits (front_mac.m: the
@@ -265,6 +348,7 @@ void coop_bridge_stop(void) {
     if (atomic_compare_exchange_strong(&g_state, &on, -1)) {
         atomic_store(&g_world, 0);   // (the wraps then pass straight through the module's hooks)
         dm_coop_camera_wanted = NULL; dm_coop_pad_filter = NULL;
+        pthread_mutex_lock(&g_present_mu); pthread_mutex_unlock(&g_present_mu);   // (the present work running now ends first; none starts after)
         if (m_stop) { LOG("coop: stopping the co-op module"); m_stop(); }
     }
 }
@@ -320,6 +404,7 @@ static void coop_load(void) {
         int n = 0; for (uint64_t m = g_wrap_mask; m; m &= m - 1) n++;
         LOG("coop: world hooks on (level %d): 6 events, %d wrapped game functions", W_VERSION, n);
     } else LOG("coop: the module did not answer the world hello: no world events or wraps");
+    present_worker_start();
     dm_present_hook = coop_present;
     coop_voice_init();   // voice chat, once the module asks for it (voice.c)
     if (m_pad) dm_coop_pad_filter = coop_pad_filter;   // player 1's pad: the module first
@@ -331,26 +416,41 @@ static void coop_load(void) {
 static void coop_obs(uint64_t *regs, int param) {
     if (param == SITE_HOLD) {
         if (atomic_load_explicit(&g_state, memory_order_acquire) != 1 || !m_hold) return;
+        const uint64_t t0 = cost_now();
         const uint32_t was = (uint32_t)regs[0], now = m_hold(regs[21], was);
         if (now != was) regs[0] = now;
+        cost_add(COST_HOLD, t0);
         return;
     }
     if (param >= SITE_TITLE_SETUP && param <= SITE_TITLE_GONE) {   // the title screen: the screen object (x19 at its set-up, x0 at the others)
         if (atomic_load_explicit(&g_state, memory_order_acquire) != 1 || !m_title) return;
         static const int event[] = {1, 2, 0}, reg[] = {19, 0, 0};
         coop_ctx_t c = {.regs = regs};
+        const uint64_t t0 = cost_now();
         m_title(&c, regs[reg[param - SITE_TITLE_SETUP]], event[param - SITE_TITLE_SETUP]);
+        cost_add(COST_TITLE, t0);
         return;
     }
     if (param >= SITE_MENU_TICK && param <= SITE_VIEW) {   // the menus' screens, the pause menu, the gameplay view (menus.c), once the module is on
-        if (atomic_load_explicit(&g_state, memory_order_acquire) == 1) coop_menus_obs(regs, param - SITE_MENU_TICK);
+        if (atomic_load_explicit(&g_state, memory_order_acquire) != 1) return;
+        const uint64_t t0 = cost_now();
+        coop_menus_obs(regs, param - SITE_MENU_TICK);
+        cost_add(COST_MENUS, t0);
         return;
     }
-    if (param >= SITE_COUNTER) { world_event(regs, param); return; }
+    if (param >= SITE_COUNTER) {
+        if (!atomic_load_explicit(&g_world, memory_order_acquire)) return;
+        const uint64_t t0 = cost_now();
+        world_event(regs, param);
+        cost_add(COST_WORLD, t0);
+        return;
+    }
     if (atomic_load_explicit(&g_state, memory_order_acquire) == 0) coop_load();   // the first frame hook, on the game's calc thread
     if (atomic_load_explicit(&g_state, memory_order_acquire) != 1) return;
     coop_ctx_t c = {.regs = regs};
+    const uint64_t t0 = cost_now();
     m_frame(&c, param);
+    cost_add(COST_FRAME, t0);
 }
 void coop_bridge_init(void) { gate_obs_set(OBS_COOP, coop_obs); }
 // For menus.c (the game's menus and camera): main's base, a fault-safe read, and a game function called from a gate's registers (x0 one argument)

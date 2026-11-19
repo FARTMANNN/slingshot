@@ -15,6 +15,8 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreText/CoreText.h>
 #import <QuartzCore/QuartzCore.h>
+#include <IOKit/ps/IOPowerSources.h>
+#include <IOKit/ps/IOPSKeys.h>
 
 uint64_t mtl_present_count(void);   // nvn_mtl.m: frames put on screen
 int dm_haptics_enabled(void);       // hle_haptics.c
@@ -177,6 +179,43 @@ static void sm_display_set(int v) {
 }
 static int sm_opmode_get(void) { return dm_opmode() ? 1 : 0; }
 static void sm_opmode_set(int v) { dm_set_opmode(v); LOG("slingshot: console mode %s", v ? "docked" : "handheld"); }
+// What macOS lets the chip run at: Low Power Mode (System Settings › Battery) holds the CPU and GPU clocks down, so the game cannot hold 60 fps; heat
+// (thermal state serious or critical) does the same until the Mac cools. Logged at start and on each change (looked at every 5 s), and shown on the
+// Graphics page, so a slow run's log says which it was
+static int sm_power_battery(void) {
+    CFTypeRef info = IOPSCopyPowerSourcesInfo(); if (!info) return 0;
+    CFStringRef from = IOPSGetProvidingPowerSourceType(info);
+    int battery = from && CFEqual(from, CFSTR(kIOPMBatteryPowerKey));
+    CFRelease(info);
+    return battery;
+}
+static NSString *sm_power_text(void) {
+    NSProcessInfo *p = NSProcessInfo.processInfo;
+    NSString *s = p.lowPowerModeEnabled ? @"Low Power Mode" : sm_power_battery() ? @"Battery" : @"Plugged in";
+    return p.thermalState >= NSProcessInfoThermalStateSerious ? [s stringByAppendingString:@", hot"] : s;
+}
+static NSString *sm_power_note(void) {
+    NSProcessInfo *p = NSProcessInfo.processInfo;
+    if (p.lowPowerModeEnabled) return @"Low Power Mode is on: macOS slows the chip down and the game cannot hold 60 fps. Turn it off in System Settings › Battery.";
+    if (p.thermalState >= NSProcessInfoThermalStateSerious) return @"The Mac is hot: macOS slows the chip down until it cools.";
+    return sm_power_battery() ? @"On battery, at full speed while Low Power Mode is off (System Settings › Battery)." : @"Plugged in: full speed.";
+}
+static void sm_power_check(void) {
+    static NSString *was;
+    NSProcessInfo *p = NSProcessInfo.processInfo;
+    static const char *const heat[] = {"nominal", "fair", "serious", "critical"};
+    NSInteger th = p.thermalState;
+    NSString *now = [NSString stringWithFormat:@"%s, Low Power Mode %s, thermal state %s", sm_power_battery() ? "on battery" : "plugged in",
+                     p.lowPowerModeEnabled ? "on (the CPU and GPU run slower)" : "off", th >= 0 && th <= 3 ? heat[th] : "unknown"];
+    if ([now isEqualToString:was]) return;
+    LOG("slingshot: power: %s%s", now.UTF8String, was ? " (changed)" : "");
+    was = now;
+}
+static void sm_power_watch(void) {
+    sm_power_check();
+    NSTimer *t = [NSTimer timerWithTimeInterval:5 repeats:YES block:^(NSTimer *x) { (void)x; sm_power_check(); }];
+    [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
+}
 static int sm_rumble_get(void) { return dm_haptics_enabled() ? 1 : 0; }
 static void sm_rumble_set(int v) { dm_haptics_set_enabled(v); LOG("slingshot: rumble %s", v ? "on" : "off"); }
 static GCExtendedGamepad *sm_gamepad(void) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) return c.extendedGamepad; return nil; }
@@ -209,7 +248,7 @@ enum { SM_RESUME, SM_GRAPHICS, SM_CONTROLS, SM_MODS, SM_QUIT, SM_CATS };
 typedef struct { const char *name, *about; sm_row rows[SM_ROWS_MAX]; int n; } sm_page;
 static sm_page g_sm_pages[SM_CATS] = {
     {"Resume", "Back to the game."},
-    {"Graphics", "The frame-rate counter, the performance overlay, the window and the console mode."},
+    {"Graphics", "The frame-rate counter, the performance overlay, the window, the console mode and the Mac's power."},
     {"Controls", "Rumble, and the controller Slingshot sees."},
     {"Mods", "Your mods. Changes show the next time the game loads the files they change."},
     {"Quit Game", "Close the game."},
@@ -221,8 +260,9 @@ static void sm_pages(void) {
     static int done; if (done) return; done = 1;
     sm_add(SM_GRAPHICS, (sm_row){"FPS counter", "Shows the frame rate in a corner of the screen.", 5, {"Off", "Top left", "Top right", "Bottom left", "Bottom right"}, sm_fps_get, sm_fps_set});
     sm_add(SM_GRAPHICS, (sm_row){"Performance overlay", "Apple's Metal overlay: frame time, GPU time and memory.", 2, {"Off", "On"}, sm_hud_get, sm_hud_set});
-    sm_add(SM_GRAPHICS, (sm_row){"Display", "Play in a window or full screen.", 2, {"Window", "Full screen"}, sm_display_get, sm_display_set});
+    sm_add(SM_GRAPHICS, (sm_row){"Display", "Play in a window or full screen. A window can run lighter: in nxnative's tests macOS clocked the GPU lower in full screen.", 2, {"Window", "Full screen"}, sm_display_get, sm_display_set});
     sm_add(SM_GRAPHICS, (sm_row){"Console mode", "Docked is the TV mode, where the game draws sharper; handheld runs lighter.", 2, {"Handheld", "Docked"}, sm_opmode_get, sm_opmode_set});
+    sm_add(SM_GRAPHICS, (sm_row){"Power", NULL, -1, {0}, NULL, NULL, sm_power_text, sm_power_note});
     sm_add(SM_CONTROLS, (sm_row){"Rumble", "Controller vibration.", 2, {"Off", "On"}, sm_rumble_get, sm_rumble_set});
     sm_add(SM_CONTROLS, (sm_row){"Controller", NULL, -1, {0}, NULL, NULL, sm_pad_name, sm_pad_note});
     smc_add_row();   // Squadala!, first on the Mods page when it is installed
@@ -586,5 +626,6 @@ static void sm_start(void) {
     NSInteger pos = [d objectForKey:@"SlingshotFPSCorner"] ? [d integerForKey:@"SlingshotFPSCorner"] : [d boolForKey:@"SlingshotShowFPS"] ? 1 : 0;   // phase 1 kept on / off
     if (pos > 0 && pos <= 4) sm_fps_set((int)pos);
     if ([d boolForKey:@"SlingshotMetalHUD"]) sm_hud_set(1);
+    sm_power_watch();
     LOG("slingshot: in-game menu ready (F1, Esc or a tap of Home)");
 }

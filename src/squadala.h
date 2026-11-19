@@ -541,7 +541,10 @@ static void smc_overlay_tick(void) {
     // window server puts the game's picture on screen alone again: a transparent layer over it costs a composite of the whole window each frame
     // The part redrawn is where something was drawn last time and where it is now (a measuring pass of the module's drawing, nothing drawn), so a name tag
     // moving redraws a few hundred pixels, not the window's 3.7 million
+    // The view is shown only while that box holds something: the module can want to draw (players in the session) and draw nothing (none in sight)
     static CGRect was;
+    static uint64_t ticks, shown, spent_ns, worst_ns; static double next_log;
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     int want = g_smc_draw_wanted() != 0;
     CGFloat k = g_win.backingScaleFactor ?: 1;
     CGRect now = CGRectNull;
@@ -553,13 +556,23 @@ static void smc_overlay_tick(void) {
         if (g_smc_draw2) g_smc_draw2(&d); else g_smc_draw1(&d);
         g_smc_measure = 0;
         if (!CGRectIsNull(g_smc_box)) now = CGRectInset(CGRectMake(g_smc_box.origin.x / k, g_smc_box.origin.y / k, g_smc_box.size.width / k, g_smc_box.size.height / k), -6, -6);
-        if (g_smc_overlay.hidden) g_smc_overlay.hidden = NO;
     }
     CGRect dirty = CGRectUnion(was, now);
-    if (!CGRectIsNull(dirty)) [g_smc_overlay setNeedsDisplayInRect:NSRectFromCGRect(dirty)];
-    else if (!want && !g_smc_overlay.hidden) g_smc_overlay.hidden = YES;   // nothing drawn, nothing to draw: hidden, so the game's picture is shown alone
+    if (!CGRectIsNull(now) && g_smc_overlay.hidden) g_smc_overlay.hidden = NO;
+    if (!CGRectIsNull(dirty)) [g_smc_overlay setNeedsDisplayInRect:NSRectFromCGRect(dirty)];   // (what was drawn last time is cleared: one more draw)
+    else if (!g_smc_overlay.hidden) g_smc_overlay.hidden = YES;   // nothing drawn now or last time: hidden, so the game's picture is shown alone
     was = now;
-    g_smc_drew = want;
+    g_smc_drew = !CGRectIsNull(now);
+    // Every 10 s, for frame-rate reports: how often the overlay was up, and what the module's drawing took here (the measuring pass, on the main thread)
+    const uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+    ticks++, shown += !g_smc_overlay.hidden, spent_ns += dt; if (dt > worst_ns) worst_ns = dt;
+    const double t = CACurrentMediaTime();
+    if (!next_log) next_log = t + 10;
+    else if (t >= next_log) {
+        if (shown || spent_ns > ticks * 100000) LOG("slingshot: Squadala!'s overlay over the last %.0f s: up %.0f%% of the time, the module's drawing measured in %.2f ms a tick (max %.2f) on the main thread",
+            t - next_log + 10, 100.0 * (double)shown / (double)ticks, (double)spent_ns / 1e6 / (double)ticks, (double)worst_ns / 1e6);
+        ticks = shown = spent_ns = worst_ns = 0; next_log = t + 10;
+    }
 }
 
 // ---- Keys in play (Longshot's patch 0001: the window offers key presses and characters to the module first) ------------------------------------------------

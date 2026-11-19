@@ -3,10 +3,15 @@
 //
 // Three observation gates (dm/games/0400486024DEC000/patches.py, OBS_COOP sites 18 to 20), on the game's threads, only while the module is on:
 //   - 18, every menu screen's update (f_802f1380, x0 the screen; Longshot calls hos_oot_menu_tick there): the screens are tracked as Longshot tracks
-//     them. Which runs, which has a focused button shown (looked at every 6th update), the HUD screen (vtable 0x84c08300: the minimap and the Map
-//     page's map), the panel's frame (0x84c08aa0: Key Items, Threads of Time, Map), whether the Map page is shown (the frame running alone), and
-//     whether a game menu is in front (a screen with a focused button shown, as the one Longshot gives the mouse). The HUD's own refresh
-//     (f_833e4200) runs here, at the HUD screen's own update, when the module asked for it.
+//     them. Which runs, which has a focused button shown (looked at every update for a new screen's first 12, then every 6th), the HUD screen
+//     (vtable 0x84c08300: the minimap and the Map page's map), the panel's frame (0x84c08aa0: Key Items, Threads of Time, Map), whether the Map page
+//     is shown (the frame running alone), and whether a game menu is in front (a screen with a focused button shown, as the one Longshot gives the
+//     mouse). The HUD's own refresh (f_833e4200) runs here, at the HUD screen's own update, when the module asked for it.
+//     Timing, which is this file's own (Longshot: a screen stops after 200 ms without an update, a menu is in front for 150 ms after it was): each
+//     screen updates once a game frame, so a screen has stopped when it missed its update in the last 1.6 frames (the frame measured from the
+//     screens' own updates, 25 to 200 ms), counted from the latest update of any screen, so a long frame stops none. The Map page counts as shown
+//     two frames after it began (the picture on screen is about that far behind the game), and stops counting the moment its frame stops: the
+//     players' marks on it come and go with the map, not 200 ms after it closed.
 //   - 19, the pause menu's handler of a pane getting the focus (f_802ed660, x0 the screen): which screen is the pause menu.
 //   - 20, the head of the view routine's loop (f_804e48c0 at 0x804e5068, x20 the view): the gameplay view (camera zero's, vtable 0x84c18a88) goes
 //     to the module's hos_coop_view first (the Customize page's camera around your Link), and its matrix is built from the eye and target it gives.
@@ -60,9 +65,12 @@ typedef struct { uint64_t screen, vt; int64_t first_ns, seen_ns, lost_ns; int fo
 static seen_t g_seen[24];
 static os_unfair_lock g_seen_lock = OS_UNFAIR_LOCK_INIT;   // (the screens' updates run on several of the game's threads at once)
 static _Atomic uint64_t g_pause, g_hud, g_panel;              // the pause menu's screen; the HUD screen and the panel's frame, as seen
-static _Atomic int g_map_page, g_refresh_wanted;
-static _Atomic int64_t g_front_ns, g_hud_seen_ns;             // when a game menu was last in front; when the HUD screen last ran (0: not since seen)
+static _Atomic int g_map_page, g_menu_front, g_refresh_wanted;   // the Map page shown, a game menu in front: as of the latest update
+static _Atomic int64_t g_hud_seen_ns;                        // when the HUD screen last ran (0: not since seen)
 static _Atomic uint32_t g_refreshes;
+static _Atomic int64_t g_frame_ns = 33333333;                 // the game's frame, from the screens' updates (each runs once a frame)
+static _Atomic int64_t g_last_ns, g_map_since;                // the latest update of any screen; when the Map page began (0: not shown)
+static int64_t stale_ns(void) { const int64_t s = atomic_load(&g_frame_ns) * 8 / 5; return s < 25000000 ? 25000000 : s > 200000000 ? 200000000 : s; }
 static seen_t *screen_seen(uint64_t screen, int64_t now, uint64_t main) {
     seen_t *free_one = NULL;
     for (int i = 0; i < 24; i++) {
@@ -84,14 +92,24 @@ static void menu_tick(uint64_t *regs) {
     const int64_t now = mono_ns();
     os_unfair_lock_lock(&g_seen_lock);
     seen_t *me = screen_seen(screen, now, main);
+    if (me->running && me->seen_ns && now - me->seen_ns < 250000000) {   // (its last update a frame ago: the frame, smoothed)
+        const int64_t f = atomic_load(&g_frame_ns);
+        atomic_store(&g_frame_ns, f + (now - me->seen_ns - f) / 8);
+    }
+    static int64_t resumed;   // (the first update after a long frame: until each screen has had its next one, none stops)
+    const int64_t stale = stale_ns(), prev = atomic_load(&g_last_ns);
+    if (now - prev > stale) resumed = now;
     me->running = 1, me->seen_ns = now;
+    atomic_store(&g_last_ns, now);
     if (screen == atomic_load(&g_hud)) atomic_store(&g_hud_seen_ns, now);
-    for (int i = 0; i < 24; i++) if (g_seen[i].running && now - g_seen[i].seen_ns > 200000000) g_seen[i].running = 0;   // (no update for 200 ms: stopped)
-    if (me->n++ % 6 == 0) {
+    if (now - resumed > stale)
+        for (int i = 0; i < 24; i++) if (g_seen[i].running && now - g_seen[i].seen_ns > stale) g_seen[i].running = 0;   // (missed its update: stopped)
+    if (me->n < 12 || me->n % 6 == 0) {
         const int had = me->focus;
         me->focus = has_focus(screen);
         if (had && !me->focus) me->lost_ns = now;
     }
+    me->n++;
     int frame = 0, other = 0;   // the Map page: the panel's frame running alone (not under Key Items, Threads of Time or the pause menu)
     const uint64_t pause = atomic_load(&g_pause);
     for (int i = 0; i < 24; i++) {
@@ -100,16 +118,17 @@ static void menu_tick(uint64_t *regs) {
         if (g_seen[i].vt == main + KEY_ITEMS_VT || g_seen[i].vt == main + THREADS_VT || g_seen[i].screen == pause) other = 1;
     }
     const int map_page = frame && !other;
+    if (map_page && !atomic_load(&g_map_page)) atomic_store(&g_map_since, now);
     atomic_store(&g_map_page, map_page);
-    const seen_t *front = NULL;   // the screen in front: of those that ran in the last 100 ms with a focused button shown (or a panel page), the last to come
+    const seen_t *front = NULL;   // the screen in front: of those running with a focused button shown (or a panel page), the last to come
     for (int i = 0; i < 24; i++) {
         const uint64_t vt = g_seen[i].vt;
         const int panel = vt == main + KEY_ITEMS_VT || vt == main + THREADS_VT || (vt == main + PANEL_FRAME_VT && map_page);
         if (g_seen[i].screen && (g_seen[i].focus || now - g_seen[i].lost_ns < 500000000 || panel) && g_seen[i].running &&
-            now - g_seen[i].seen_ns < 100000000 && (!front || g_seen[i].first_ns > front->first_ns))
+            now - g_seen[i].seen_ns <= stale && (!front || g_seen[i].first_ns > front->first_ns))
             front = &g_seen[i];
     }
-    if (front) atomic_store(&g_front_ns, now);
+    atomic_store(&g_menu_front, front != NULL);
     os_unfair_lock_unlock(&g_seen_lock);
     // The HUD screen's own refresh (it reads the dungeon's map, compass, boss key and floors into what the minimap and the Map page draw), when the
     // module asked: here, at that screen's own update on the game's thread, so the screen is alive by definition
@@ -128,9 +147,12 @@ __attribute__((visibility("default"))) int hos_coop_menu_state(menu_state_t *out
     if (!out || out->size < offsetof(menu_state_t, hud_ran_ns_ago)) return 0;   // (an older module's smaller one too)
     const int long_one = out->size >= sizeof *out;
     out->size = long_one ? (uint32_t)sizeof *out : (uint32_t)offsetof(menu_state_t, hud_ran_ns_ago);
-    out->map_page = atomic_load(&g_map_page);
-    const int64_t at = atomic_load(&g_front_ns), now = mono_ns();
-    out->menu_open = at && now - at < 150000000;
+    // (as of the latest update, unless no screen has run for 250 ms: no game menu then; the Map page two frames after it began)
+    const int64_t now = mono_ns(), last = atomic_load(&g_last_ns), frame = atomic_load(&g_frame_ns);
+    const int live = last && now - last < 250000000;
+    const int64_t open_after = frame * 2 < 30000000 ? 30000000 : frame * 2 > 120000000 ? 120000000 : frame * 2;
+    out->map_page = live && atomic_load(&g_map_page) && now - atomic_load(&g_map_since) >= open_after;
+    out->menu_open = live && atomic_load(&g_menu_front);
     out->reserved = 0;
     out->hud_screen = atomic_load(&g_hud), out->panel_screen = atomic_load(&g_panel);
     if (long_one) {
