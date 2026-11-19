@@ -121,7 +121,7 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`, and the run before it
 | `coop: cost over N presents: …` | What co-op takes each frame, every 10 s: its main work on its own thread (p50, p95, max), then what its hooks take on the game's threads. Attach these lines to a frame-rate report. |
 | `slingshot: Squadala!'s overlay over the last 10 s: up N% …` | How often the drawing over the picture (chat, name tags, map marks) was up. |
 
-**Low frame rate?** Check these first: the Power row on the menu's Graphics page (Low Power Mode or heat), a window instead of full screen (the Display row), and handheld instead of docked. The `[nvn] frame step` lines say when and why the game dropped to 30 or 20 fps: `GPU 1.6` means the GPU took 1.6 frames of time, and a `cost` far above the `GPU` figure means the CPU side was slow.
+**Low frame rate?** Check these first: the Power row on the menu's Graphics page (Low Power Mode or heat), a window instead of full screen (the Display row), and handheld instead of docked. The `[nvn] frame step` lines say when and why the game dropped to 30 or 20 fps: `GPU 1.6` means the GPU took 1.6 frames of time, and a `cost` far above the `GPU` figure means the CPU side was slow. In that case turn Dynamic resolution off in the launcher. The game lowers its resolution whenever its frames run long, whatever the cause, so it can sit at 854x480 while the GPU has time to spare.
 
 `SLINGSHOT_COOP=0` starts the game without Squadala!. `HOS_COOP_NULL_READS=0` turns off co-op's null-read handling, to rule it out when the game crashes. `HOS_COOP_VOICE=0` keeps voice chat off.
 
