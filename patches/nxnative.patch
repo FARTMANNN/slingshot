@@ -1,5 +1,5 @@
 diff --git a/dm/games/0400486024DEC000/patches.py b/dm/games/0400486024DEC000/patches.py
-index 2e7727a0..8ab59bf5 100644
+index 2e7727a0..5887abdc 100644
 --- a/dm/games/0400486024DEC000/patches.py
 +++ b/dm/games/0400486024DEC000/patches.py
 @@ -1,6 +1,6 @@
@@ -10,7 +10,7 @@ index 2e7727a0..8ab59bf5 100644
  
  # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
  # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
-@@ -104,6 +104,106 @@ movie_cap = 'movie update cap: 3 pictures a frame, the frame step\'s largest hol
+@@ -104,6 +104,130 @@ movie_cap = 'movie update cap: 3 pictures a frame, the frame step\'s largest hol
  # sets the frame to the pictures the player has taken (the player's +0xc: its update adds what it advances each frame; reset when a movie starts, as +0x2f8 is), so the
  # timeline follows the picture whatever the frame takes. The player is the object at +0x10, already read by both draws (main+0x3b5ce80 on it) just before.
  movie_frame = 'movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn'
@@ -51,6 +51,9 @@ index 2e7727a0..8ab59bf5 100644
 +    (0x2d1384, OBS_COOP | 18 << 8, 'fc180fea', "co-op menus: every menu screen's update f_802f1380 after its pacibsp (x0 the screen; str d10, [sp, #-0x80]!): the screens"),
 +    (0x2cd664, OBS_COOP | 19 << 8, 'd10203ff', "co-op menus: the pause menu's pane-focus handler f_802ed660 after its pacibsp (x0 the screen; sub sp, sp, #0x80)"),
 +    (0x4c5068, OBS_COOP | 20 << 8, 'f9401268', "co-op camera: the view routine f_804e48c0's loop head (x20 the view; ldr x8, [x19, #0x20]): the Customize page's camera"),
++    # Squadala! 0.11.12's two more events: 0007's LIFE_REVIVE (nx2/coop_actor_lift.py "life revive") and 0029's NODE_START (nx2/coop_node_lift.py)
++    (0x49ed0c, OBS_COOP | 21 << 8, '8b080260', "co-op actors: the Life step at life 0, the revive check's argument next (x19 the component; add x0, x19, x8): LIFE_REVIVE, which may point the check at a record that answers no revive"),
++    (0x27517c4, OBS_COOP | 22 << 8, 'f9413929', "co-op world: the push node's start of a pushed block, its actor read (x0 the node, x9 the actor; ldr x9, [x9, #0x270]): NODE_START"),
 +]}
 +def coop_puppet_guard(ctx):
 +    here, emit = ctx.here, ctx.emit
@@ -64,7 +67,26 @@ index 2e7727a0..8ab59bf5 100644
 +    emit(0xb5000048); emit(B(here(), out))   # cbnz x8, +8; its +0x20 is null: out
 +    emit(B(here(), back))
 +    ctx.put(site, [B(site, start)], 'co-op puppet guard: a missing slot-10 component (or its +0x20) goes to the function\'s own way out at main+0x4b83b8')
-+# The wrapped game functions (co-op's patches 0005, 0013, 0014, 0017 and 0024: nx2/coop_world_wraps.py, coop_player_wraps.py): every call, direct,
++# The bow guard (co-op's patch 0038, nx2/coop_puppet_bow_guard.py): a co-op puppet wears the other player's bow or slingshot through the game's own wear
++# call, which makes the puppet the item's wearer, and the bow's update (main+0x2dcee60) reads the wearer's Player component (+0x7d8, through main+0x82acc0)
++# without a check: the game knows only Link as a bow's wearer, and a puppet has no Player component. After `mov x23, x0` (x0 the wearer, not 0), the stub
++# reads the component as main+0x82acc0 does ([[x0+0x270]+0x358]); when it or its table is missing, the bow takes the function's own exit (main+0x2dcef04),
++# where the game goes for a wearer that is not aiming. Link has the component and runs as shipped.
++def coop_puppet_bow_guard(ctx):
++    here, emit = ctx.here, ctx.emit
++    site, out, back = 0x2dceef0, 0x2dcef04, 0x2dceef4
++    ctx.site(site, 'f70300aa')   # mov x23, x0
++    for off, orig in ((0x2dceeec, 'c00000b4'), (0x2dceef4, '736f6997'), (0x2dceef8, '08d847b9'), (out, 'e83b40fd')):
++        ctx.site(off, orig)   # cbz x0, main+0x2dcef04; bl main+0x82acc0; ldr w8, [x0, #0x7d8]; the exit's ldr d8, [sp, #0x70] (checked, not changed)
++    start = here()
++    emit(0xf9413810)                          # ldr x16, [x0, #0x270]: the wearer's component table (x16 free here: a call came just before)
++    emit(0xb5000050); emit(B(here(), out))   # cbnz x16, +8; none: out
++    emit(0xf941ae10)                          # ldr x16, [x16, #0x358]: its Player component
++    emit(0xb5000050); emit(B(here(), out))   # cbnz x16, +8; none (a puppet): out
++    emit(0xaa0003f7)                          # mov x23, x0
++    emit(B(here(), back))
++    ctx.put(site, [B(site, start)], 'co-op bow guard: a bow or slingshot worn by a Link with no Player component (a co-op puppet) takes the update\'s own exit at main+0x2dcef04')
++# The wrapped game functions (co-op's patches 0005, 0013, 0014, 0017, 0024 and 0036: nx2/coop_world_wraps.py, coop_player_wraps.py): every call, direct,
 +# tail or through a table, reaches the function's first instruction, which branches to a stub here. The stub reads the host's wrap entry from
 +# the frame step state page (+0xc00, written by dm/slingshot/src/coop/bridge.c once the co-op module is on; 0 before and without it: the stub runs
 +# the function as shipped): with it, x16 = the wrap id and x15 = the function's own start (its first instruction, then a branch to the
@@ -86,6 +108,7 @@ index 2e7727a0..8ab59bf5 100644
 +    (18, 0x3025850, ('d000f388', '9138e108', 'f9400109', 'b4000149', '9100c128', 'b940010a', '3500012a', 'b940352a')),   # PLAYER_INPUT_OFF
 +    (19, 0x3b25e00, ('d503237f', 'a9be7bfd', 'f9000bf3', '910003fd', '9104400a', '5100042b', '9102c009', 'aa0003e8')),   # CONTROLLER_GET
 +    (24, 0x440630, ('d503237f', 'a9bb7bfd', 'a90167fa', 'a9025ff8')),   # SOUND_EMIT: xlink2's searchAndEmit
++    (10, 0x2723f80, ('d503237f', 'd10103ff', 'a9027bfd', 'a9034ff4')),   # BOSS_ORDER: Kotake and Koume take their battle manager's orders (patch 0036)
 +)
 +COOP_WRAP_MASK = sum(1 << w for w, _, _ in COOP_WRAPS)   # (slingshot/src/coop/bridge.c says the same bits to the module: HOS_COOP_WORLD_HELLO)
 +def _le(word): return bytes.fromhex(word)[::-1].hex()   # an instruction word as its bytes
@@ -111,13 +134,14 @@ index 2e7727a0..8ab59bf5 100644
 +        ctx.put(off, [B(off, start)], f'co-op wrap {wid}: the function\'s calls go through the host\'s wrap entry while the co-op module is on')
 +def coop_stubs(ctx):
 +    coop_puppet_guard(ctx)
++    coop_puppet_bow_guard(ctx)
 +    coop_wraps(ctx)
 +STUBS = {COOP_BUILD: coop_stubs}
 +
  MATCH_CUTS = {'main': [
      {'name': movie_pictures, 'size': 828, 'fingerprints': ['f61ad468b6b4e1d574fe8678f5a12dfc60e1aab71be7375142a4b48b0d73ce19'],   # v131072 main+0x3b5cec0
       'cuts': [(452, '88b79c1a', '48008052', movie_pictures + ' (cinc w8, w28, ge → mov w8, #2; as v131072 main+0x3b5d084)')]},
-@@ -118,6 +218,12 @@ MATCH_CUTS = {'main': [
+@@ -118,6 +242,15 @@ MATCH_CUTS = {'main': [
  ]}
  
  BINDING = [
@@ -127,6 +151,9 @@ index 2e7727a0..8ab59bf5 100644
 +    {'what': 'co-op puppet guard: a missing slot-10 component skips the hair marks', 'now': 'build', 'goal': 'build', 'purpose': 'mods',
 +     'why': "co-op's own guard (its nx2/coop_puppet_guard.py) for the same build; the actor that has the component runs as shipped",
 +     'checked': 'v131072 main: the five words at main+0x4b8338..0x4b8348 as co-op lists them (2026-11-17)'},
++    {'what': "co-op hooks of Squadala! 0.11.12: LIFE_REVIVE and NODE_START gates, the boss orders wrap, the puppet bow guard", 'now': 'build', 'goal': 'build', 'purpose': 'mods',
++     'why': "co-op's own hooks (its nx2/coop_actor_lift.py, coop_node_lift.py, coop_world_wraps.py and coop_puppet_bow_guard.py) for the same build; Link and the game's own actors run as shipped",
++     'checked': 'v131072 main: the words at main+0x49ed04..0x49ed18, 0x2751790..0x27517c4, 0x2723f80..0x2723f8c and 0x2dceee8..0x2dcef04 as co-op lists them, read by disassembly (2026-11-23)'},
      {'what': 'movie pictures a frame: up to 2', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
       'why': "the game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main",
       'checked': 'v131072 main: one function with this fingerprint, the constructor, its one caller, the update and the advance read by disassembly; the limit and the count read in play with DM_PROBE, the opening movie timed at a 30 fps frame step without and with the cut (2026-11-12)'},

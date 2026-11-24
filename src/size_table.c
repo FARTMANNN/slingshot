@@ -9,8 +9,10 @@
 //   new file gets a guess with room to spare; skin.json "sizes" and a table inside a skin raise it further.
 // Made again only when something it reads changed (its key, mods/link-skins/table/key.txt: every table's and skin file's size and time), and written only
 // when its bytes change. Beside it, coop-merged.txt: Squadala!'s mark that the table holds the puppet pack's entries (else the module shows the other
-// players as fairies). Without a skin there is no such table: slingshot_size_merge (below) then does what the kit's start does, merge_tables.py: the
-// table the game will read gets every other mod's entries. Read with the vendored zstd decoder; written as a zstd frame of raw blocks.
+// players as fairies). It is made after Squadala!'s own merge_tables.py ran (mods.h smm_merge_step: the kits' start merge, which also puts the puppets'
+// rows into other mods' actor tables and keeps the pack's menu files out where the table cannot hold them), so it holds what that merge gave each mod.
+// Without that tool and without a skin, slingshot_size_merge (below) does the size-table part of that merge: the table the game will read gets every
+// other mod's entries. Read with the vendored zstd decoder; written as a zstd frame of raw blocks.
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>

@@ -2,9 +2,9 @@
 
 Slingshot is a Mac front end for the *Ocarina of Time* remake (Switch 2, version 1.1.1, build `e0f3ccfaf50065ae`). The game runs natively on Apple silicon through [nxnative](https://github.com/seedds/nxnative). Slingshot adds:
 
-- an in-game menu in the game's own style (graphics, controls, mods, FPS counter);
+- an in-game menu in the game's own style (graphics, controls, mods, FPS counter), also opened from the pause menu's System page (Slingshot Settings);
 - mods, including Link Skins (skins for Link, changed while you play);
-- [Squadala!](https://github.com/daurosk/oot-remake-multiplayer) online co-op. It is the same module as on Windows and Linux, built from its own source, so Mac players join the same games. Its randomizer ([OOTRR](https://github.com/REALAZK/ootrr)) gives the same seeds.
+- [Squadala!](https://github.com/daurosk/oot-remake-multiplayer) online co-op. It is the same module as on Windows and Linux, built from its own source, so Mac players join the same games. Its pages are in the game's own pause menu, as on PC. Its randomizer ([OOTRR](https://github.com/ootrando/ootrr)) gives the same seeds.
 
 **Status:** testing.
 
@@ -43,10 +43,10 @@ These two steps are optional:
 
 ## Playing
 
-- **The menu:** press F1 or Esc, or tap Home on a controller.
+- **The menu:** press F1 or Esc, tap Home on a controller, or choose Slingshot Settings on the pause menu's System page.
 - **Mods:** each mod is a folder in `~/Library/Application Support/Slingshot/mods` with a `romfs` folder inside. You can also use the emulator layout (`contents/0400486024DEC000/<mod>/romfs`). Turn mods on and off on the menu's Mods page.
 - **Link Skins:** each skin is in `mods/link-skins/skins/<name>/`, with `romfs/` and a `skin.json`. Pick one on the Mods page. The skin shows when you load your save again or Link changes age.
-- **Co-op:** open the menu, then Mods › Squadala! › Multiplayer, or use the Multiplayer rows on the title screen. To host, to join, and to make randomizer seeds, it works as on PC.
+- **Co-op:** press − in the game for the pause menu's Multiplayer, Lobby and Mods tabs, or use the Multiplayer rows on the title screen. Slingshot's own menu has the same pages under Mods › Squadala!. To host, to join, and to make randomizer seeds, it works as on PC.
 
 Slingshot keeps its files in `~/Library/Application Support/Slingshot`:
 
@@ -61,8 +61,8 @@ Slingshot keeps its files in `~/Library/Application Support/Slingshot`:
 | Path | What it is |
 |---|---|
 | `src/menu.h` | The in-game menu. Rows are data (`sm_row`), and the look comes from the game's own fonts and textures. |
-| `src/mods.h` | The Mods page and the mod loader. It finds mods the way Longshot does, orders them the same way, lets you wear one skin at a time, and reads Squadala!'s mod list. |
-| `src/size_table.c` | The game's resource size table over every mod and skin, made at each start. It also does what the PC kit's start does: it marks or merges the table so the other players' puppets can load. |
+| `src/mods.h` | The Mods page and the mod loader. It finds mods the way Longshot does, orders them the same way, lets you wear one skin at a time, and reads Squadala!'s mod list. At each start it runs Squadala!'s own start steps (your Link's tunic files, the merge of size and actor tables). |
+| `src/size_table.c` | The game's resource size table over every mod and skin, made at each start, and marked when it holds the puppets' entries. Without Squadala!'s tools it does the size-table part of the PC kit's start merge itself. |
 | `src/squadala.h` | Squadala! in the menu (its own tabs, drawn in Slingshot's style), its drawing over the picture, keys, the mouse and typing in play. |
 | `src/coop/bridge.c` | The bridge to Squadala!'s module (`hookshot_coop.dylib`): loading it, game hooks, memory access, game calls, null reads, the pad, keys. |
 | `src/coop/call.S` | The bridge's assembly: game calls on the game's stack, memory probes, the entry of wrapped game functions. |
@@ -72,12 +72,12 @@ Slingshot keeps its files in `~/Library/Application Support/Slingshot`:
 | `src/third_party/zstd` | The decoding half of zstd 1.5.7 (BSD), used to read size tables. |
 | `tools/install.sh` | Applies Slingshot's hooks to an nxnative checkout. |
 | `tools/make_patch.sh` | For developers: writes `patches/nxnative.patch` again from your nxnative checkout. |
-| `tools/squadala_setup.sh` | Clones Squadala! and OOTRR at their pinned release commits, builds both for macOS, makes the puppet pack, and links the shared mods folder. |
+| `tools/squadala_setup.sh` | Clones Squadala! and OOTRR at their pinned release commits, builds both for macOS, makes the puppet pack (with the pause menu's tabs), copies the pack tools Slingshot runs at each start, and links the shared mods folder. |
 | `tools/squadala_test.sh` | A co-op test on one Mac: Squadala!'s own server on this Mac, and its test Link beside you. `--off` puts things back. |
 | `tools/mods_table.py` | Link Skins' size-table rules as a script, for checking `size_table.c`. Both make the same table. |
 | `tools/ui_assets.py` | Makes the menu's look and the app icon from your own game files. |
 | `patches/nxnative.patch` | Slingshot's small hooks in nxnative's own files (listed below). |
-| `patches/squadala-macos.patch` | Slingshot's small macOS changes to Squadala!'s source (the setup applies them): a `.dylib` build, the Mac clipboard, two compile fixes, SDL calls that Slingshot answers, and the title screen's and Map page's game addresses taken from where the game is loaded. |
+| `patches/squadala-macos.patch` | Slingshot's small macOS changes to Squadala!'s source (the setup applies them): a `.dylib` build, the Mac clipboard with SDL calls that Slingshot answers, a puppet pack without co-op's Characters tab (it needs a code patch), and the System page's Slingshot Settings label. |
 | `docs/squadala.md` | How Squadala! runs on the Mac, and how each Longshot co-op patch maps to Slingshot. |
 
 ## Hooks in nxnative's own files
@@ -108,11 +108,13 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`, and the run before it
 | `slingshot: mods from …: N skins, N other mods, co-op's puppet pack` | The mods were found at start. |
 | `slingshot: size table … made` or `… unchanged` | The size table over the mods is ready. A `[RED]` line says what could not be read. |
 | `slingshot: size table: Link Skins' table holds every co-op puppet entry` | Squadala! will show the other players while skins are installed. |
-| `slingshot: size tables: the game reads X's; merged in …` | A mod with its own size table (a seed from OOTRR's site, say) got the puppets' entries, as the PC kit does. |
+| `slingshot: Squadala!'s merge_tables.py: …` | Squadala!'s own start merge, as on PC: a mod with its own size or actor table (a seed from OOTRR's site, say) got the puppets' entries. The line after it says whether everything merged. |
+| `slingshot: size tables: the game reads X's; merged in …` | Slingshot's own merge, used when Squadala!'s tools are not installed. |
 | `coop: … made without the co-op puppets' entries: no puppet this run` | The table the game reads lacks the puppets, so other players show as fairies. Check the `slingshot: size table` lines above it. |
-| `slingshot: Squadala!: your Link's tunic files: <colour>` | Your Link's colour for this start. |
+| `slingshot: Squadala!: your Link's tunic files: <colour>` | Your Link's colour for this start (`green's, your colour painted on in the game` with the current pack). |
+| `slingshot: mod X has code patches (exefs)…` | That mod changes the game's code (Character Select, say). Slingshot cannot build code mods in yet, so the mod stays off. |
 | `coop: no co-op module at …: co-op off` | Squadala! is not installed. Run `tools/squadala_setup.sh`. |
-| `coop: world hooks on (level 4): 6 events, 14 wrapped game functions` | All of co-op's game hooks are in. |
+| `coop: world hooks on (level 4): 8 events, 15 wrapped game functions` | All of co-op's game hooks are in. |
 | `coop voice: on …`, or `coop voice: [RED] no libopus …` | Voice chat is ready, or Opus is missing (run the setup again). |
 | `coop: title: the title's own rows … their texts could not be set` | The title screen's Multiplayer rows have no text. Run `tools/squadala_setup.sh` again, so the module is built with the current macOS patch. |
 | `coop: … this Longshot has no …` | Slingshot does not have that feature yet. `docs/squadala.md` says which features are missing. |

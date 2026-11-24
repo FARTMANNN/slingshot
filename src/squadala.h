@@ -27,6 +27,7 @@ enum { SMC_ACTION, SMC_CHOICE, SMC_TOGGLE, SMC_HEADING, SMC_NOTE };
 enum { SMC_UP, SMC_DOWN, SMC_LEFT, SMC_RIGHT, SMC_CONFIRM, SMC_BACK, SMC_SHOW, SMC_HIDE, SMC_SELECT, SMC_CLICK };
 #define SMC_WANT_NOTHING (-1)
 #define SMC_WANT_CLOSE (-2)
+#define SMC_WANT_OWN (-3)   // (Longshot's patch 0037, HOS_COOP_MENU_WANT_LONGSHOT) the host's own menu: the pause menu's Slingshot Settings button
 typedef struct {
     uint32_t size; int32_t state; uint16_t port, players; uint8_t invite_done, upnp_open, reserved[2];
     char invite[160], relay_code[160], answer[160], password[132], message[256]; int32_t problem; uint32_t stream_kbps;
@@ -222,6 +223,7 @@ static void smc_draw_rows(const smc_page *p) {
             continue;
         }
         CGFloat vw = sm_text(smc_fit(v, SM_REGULAR, 24, 200), SM_REGULAR, 24, ink, SM_VALUE_X, y, 1, 0, 200), half = fmax(vw / 2, 40);
+        if (w->kind == SMC_ACTION && w->right) { sm_text(@"›", SM_MEDIUM, 30, ink, 1190, y, 2, 0, 0); continue; }   // an action that says where it stands and opens a page (Longshot's patch 0031)
         if (chosen && w->kind == SMC_CHOICE && !fixed) {
             if (w->left && !sm_image(@"arrow_left", NSMakeRect(SM_VALUE_X - half - 38, y - 16, 32, 32), 1, 0)) sm_text(@"‹", SM_MEDIUM, 30, SM_INK, SM_VALUE_X - half - 12, y, 2, 0, 0);
             if (w->right && !sm_image(@"arrow_right", NSMakeRect(SM_VALUE_X + half + 6, y - 16, 32, 32), 1, 0)) sm_text(@"›", SM_MEDIUM, 30, SM_INK, SM_VALUE_X + half + 12, y, 0, 0, 0);
@@ -396,6 +398,7 @@ static void smc_tick(void) {
         if (!g_sm_open) sm_open_menu();
         if (g_sm_open) { g_sm_cat = SM_MODS; smc_enter(w); }
     } else if (w == SMC_WANT_CLOSE && g_sm_open) sm_close();
+    else if (w == SMC_WANT_OWN && !g_sm_open) { sm_open_menu(); if (g_sm_open) LOG("slingshot: the pause menu's Slingshot Settings opened the menu"); }
     if (g_sm_open && (g_smc_on || g_sm_cat == SM_MODS)) sm_redraw();   // its pages' lines and its row's state change by themselves (a join's progress, the players)
 }
 

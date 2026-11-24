@@ -10,9 +10,11 @@
 //   the frame function in moduleCalc_ (sites 0 and 1, just before their mov x0, x20, which Longshot's hook follows: the same point for
 //   the module), the AI hold (site 8: after the blr x8 that answers a BSA component its calc bits in w0, which the module may change),
 //   the world events of co-op's Longshot patches 0003/0005/0007 (sites 9..14: hos_coop_world events, the same numbers and values), and the title
-//   screen's three points (sites 15..17, patch 0004: hos_coop_title, the Multiplayer rows on it), and the game's menus and camera (sites
-//   18..20, patches 0018 and 0019: menu screens, the pause menu, the gameplay view; slingshot/src/coop/menus.c).
-//   The puppet guard is a stub in the same file (STUBS), and so are the wrapped game functions (patches 0005, 0013, 0014, 0017, 0024):
+//   screen's three points (sites 15..17, patch 0004: hos_coop_title, the Multiplayer rows on it), the game's menus and camera (sites
+//   18..20, patches 0018, 0019 and 0030: menu screens, the pause menu, the gameplay view; slingshot/src/coop/menus.c), and the events
+//   Squadala! 0.11.12 added (sites 21 and 22: patch 0007's LIFE_REVIVE, patch 0029's NODE_START).
+//   The puppet guards are stubs in the same file (STUBS: patches 0002 and 0038), and so are the wrapped game functions (patches 0005, 0013, 0014, 0017,
+//   0024 and 0036):
 //   once the module is on, the bridge writes slingshot/src/coop/call.S's wrap entry into the frame step state page (+0xc00), where the wrap stubs look,
 //   and the module's hos_coop_wrap sees every call of those functions before and after (phase 0 may skip it), as on Longshot.
 // - The world hello: once the module is on, the bridge tells it the hooks' level (hos_coop_world.h version 4) and which wraps this build
@@ -63,13 +65,14 @@ _Static_assert(sizeof(coop_api_t) == 96, "HosCoopApi (version 1, up to scratch)"
 enum { SITE_RARE = 0, SITE_FRAME = 1, SITE_PRESENT = 2, SITE_HOLD = 8,   // patches.py's OBS parameters (0..2 are hos_coop_api.h's sites)
        SITE_COUNTER = 9, SITE_CREATE = 10, SITE_DELETE = 11, SITE_LIFE = 12, SITE_LIFE_STOPS = 13, SITE_SHOOT = 14,
        SITE_TITLE_SETUP = 15, SITE_TITLE_STEP = 16, SITE_TITLE_GONE = 17,     // the title screen (Longshot's patch 0004): hos_coop_title's events 1, 2, 0
-       SITE_MENU_TICK = 18, SITE_PAUSE_FOCUS = 19, SITE_VIEW = 20 };          // the game's menus and camera (Longshot's 0018 and 0019): menus.c
+       SITE_MENU_TICK = 18, SITE_PAUSE_FOCUS = 19, SITE_VIEW = 20,            // the game's menus and camera (Longshot's 0018 and 0019): menus.c
+       SITE_LIFE_REVIVE = 21, SITE_NODE_START = 22 };                         // Squadala! 0.11.12's events (its patches 0007 and 0029)
 // hos_coop_world.h / hos_coop_actors.h: the events and the hooks' level
 enum { W_HELLO = 0, W_COUNTER_START = 1, W_CREATE_REQUEST = 2, W_DELETE_REQUEST = 3, W_LIFE_STEP = 4, W_CREATE_FROM = 5, W_CREATE_STOP = 6,
-       W_SHOOT_FROM = 7, W_LIFE_STOPS = 8, W_VERSION = 4 };
+       W_SHOOT_FROM = 7, W_LIFE_STOPS = 8, W_LIFE_REVIVE = 9, W_NODE_START = 16, W_VERSION = 4 };   // (hos_coop_nodes.h: 16)
 // The wrapped functions (patches.py COOP_WRAPS: id, main offset) and where their stubs find the wrap entry
 static const struct { uint32_t id, off; } k_wraps[] = {{1, 0xb99980}, {2, 0xeee640}, {3, 0xd7a820}, {4, 0x6733b0}, {5, 0xc08f0}, {6, 0x32d8690},
-    {7, 0x32c1db0}, {8, 0x32c2080}, {9, 0x32bbce0}, {16, 0x279ce80}, {17, 0x279e2c0}, {18, 0x3025850}, {19, 0x3b25e00}, {24, 0x440630}};
+    {7, 0x32c1db0}, {8, 0x32c2080}, {9, 0x32bbce0}, {10, 0x2723f80}, {16, 0x279ce80}, {17, 0x279e2c0}, {18, 0x3025850}, {19, 0x3b25e00}, {24, 0x440630}};
 enum { STATE_WRAP = 0xc00 };
 enum { CALL_AREA = 0x400 };   // below the gate block's sp: the call's 4 stack words, then 128 bytes for x8, then 256 of scratch
 typedef struct { uint64_t *regs; } coop_ctx_t;
@@ -132,6 +135,7 @@ extern uint64_t (*dm_coop_pad_filter)(uint64_t buttons, int32_t stick[4]);
 extern _Atomic uint64_t dm_coop_pad_word;
 static uint64_t (*m_pad)(uint64_t buttons, int32_t stick[4]);
 static void (*m_title)(void *ctx, uint64_t screen, int event);   // the title screen's Multiplayer rows (on the game's calc thread, with a ctx call() may use)
+static void (*m_game_screen)(void *ctx, uint64_t screen);         // (optional, patch 0030) every menu screen's update: the module's pause-menu pages
 static uint64_t coop_pad(void) { return atomic_load_explicit(&dm_coop_pad_word, memory_order_relaxed); }
 static uint64_t coop_pad_filter(uint64_t buttons, int32_t stick[4]) {
     return atomic_load_explicit(&g_state, memory_order_acquire) == 1 && m_pad ? m_pad(buttons, stick) : buttons;
@@ -228,6 +232,9 @@ static int coop_fault(void *addr, int is_write, void *uc_) {
 // ---- The world: events and wraps ----
 static uint64_t strip(uint64_t p) { __asm__("xpaci %0" : "+r"(p)); return p; }   // a return address without its pointer signature (pacibsp)
 static uint8_t g_no_creates[0x110] = {[0x109] = 2};   // an actor manager that takes no creates now (bit 1 of +0x109): CREATE_STOP's way out
+// LIFE_REVIVE's way out: what the revive check (main+0x49d6b0) reads to answer "no revive" with nothing else done: its +8 (here itself) has no
+// component at +0x270, and its +0x240 (its callback) is 0, so it returns 0, and the Life step goes on at main+0x49dd18, where no revive goes
+static void *g_no_revive[0x280 / 8] = {[1] = g_no_revive};
 static void world_event(uint64_t *regs, int site) {
     if (!atomic_load_explicit(&g_world, memory_order_acquire)) return;
     switch (site) {
@@ -255,6 +262,13 @@ static void world_event(uint64_t *regs, int site) {
         break;
     }
     case SITE_SHOOT: m_world(W_SHOOT_FROM, regs[1], regs[0]); break;
+    case SITE_LIFE_REVIVE: {   // before add x0, x19, x8 (the revive check's argument): the module's "dead" points the check at g_no_revive (x0 = x19 + x8)
+        uint32_t dead = 0;
+        m_world(W_LIFE_REVIVE, regs[19], (uint64_t)(uintptr_t)&dead);
+        if (dead) regs[8] = (uint64_t)(uintptr_t)g_no_revive - regs[19];
+        break;
+    }
+    case SITE_NODE_START: m_world(W_NODE_START, regs[0], regs[9]); break;   // the push node's start: the node, its actor
     }
 }
 // slingshot/src/coop/call.S's wrap entry: phase 0 (1 = the module did the call's work) and phase 1 (the caller's return back). The return and the id wait
@@ -378,6 +392,7 @@ static void coop_load(void) {
     m_wrap = (int (*)(uint32_t, int, uint64_t *, void *))dlsym(lib, "hos_coop_wrap");
     m_pad = (uint64_t (*)(uint64_t, int32_t *))dlsym(lib, "hos_coop_pad");
     m_title = (void (*)(void *, uint64_t, int))dlsym(lib, "hos_coop_title");
+    m_game_screen = (void (*)(void *, uint64_t))dlsym(lib, "hos_coop_game_screen");
     if (!m_start || !m_frame) { LOG("coop: %s has no hos_coop_start / hos_coop_frame: not the co-op module", path); return; }
     snprintf(g_build, sizeof g_build, "%s", main->build_id);
     g_text_lo = (uint64_t)(uintptr_t)main->base; g_text_hi = g_text_lo + main->text_end;
@@ -402,7 +417,7 @@ static void coop_load(void) {
         atomic_store_explicit(&g_world, 1, memory_order_release);
         if (g_wrap_mask) *(uint64_t *)(main->base + main->fps_state_off + STATE_WRAP) = (uint64_t)(uintptr_t)coop_wrap_entry;   // the wrap stubs: on
         int n = 0; for (uint64_t m = g_wrap_mask; m; m &= m - 1) n++;
-        LOG("coop: world hooks on (level %d): 6 events, %d wrapped game functions", W_VERSION, n);
+        LOG("coop: world hooks on (level %d): 8 events, %d wrapped game functions", W_VERSION, n);
     } else LOG("coop: the module did not answer the world hello: no world events or wraps");
     present_worker_start();
     dm_present_hook = coop_present;
@@ -464,4 +479,9 @@ int coop_bridge_game_call(uint64_t *regs, uint64_t fn, uint64_t x0) {
 // For the front end (slingshot/src/squadala.h: the Squadala! pages in Slingshot's menu, which draw the module's own tabs): the module's state
 // (0 not loaded yet, 1 on, -1 off: not there, refused or stopped) and its exports, found by name, only while it is on
 int coop_bridge_state(void) { return atomic_load_explicit(&g_state, memory_order_acquire); }
+void coop_bridge_game_screen(uint64_t *regs, uint64_t screen) {   // (menus.c, at each menu screen's update while the module is on)
+    if (!m_game_screen || atomic_load_explicit(&g_state, memory_order_acquire) != 1) return;
+    coop_ctx_t c = {.regs = regs};
+    m_game_screen(&c, screen);
+}
 void *coop_bridge_sym(const char *name) { return coop_bridge_state() == 1 && g_lib ? dlsym(g_lib, name) : NULL; }

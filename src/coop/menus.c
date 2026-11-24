@@ -6,7 +6,8 @@
 //     them. Which runs, which has a focused button shown (looked at every update for a new screen's first 12, then every 6th), the HUD screen
 //     (vtable 0x84c08300: the minimap and the Map page's map), the panel's frame (0x84c08aa0: Key Items, Threads of Time, Map), whether the Map page
 //     is shown (the frame running alone), and whether a game menu is in front (a screen with a focused button shown, as the one Longshot gives the
-//     mouse). The HUD's own refresh (f_833e4200) runs here, at the HUD screen's own update, when the module asked for it.
+//     mouse). The HUD's own refresh (f_833e4200) runs here, at the HUD screen's own update, when the module asked for it. Then the update goes to the
+//     module (its hos_coop_game_screen, Longshot's patch 0030), with a ctx its game calls may use: its pages in the game's own pause menus.
 //     Timing, which is this file's own (Longshot: a screen stops after 200 ms without an update, a menu is in front for 150 ms after it was): each
 //     screen updates once a game frame, so a screen has stopped when it missed its update in the last 1.6 frames (the frame measured from the
 //     screens' own updates, 25 to 200 ms), counted from the latest update of any screen, so a long frame stops none. The Map page counts as shown
@@ -15,7 +16,8 @@
 //   - 19, the pause menu's handler of a pane getting the focus (f_802ed660, x0 the screen): which screen is the pause menu.
 //   - 20, the head of the view routine's loop (f_804e48c0 at 0x804e5068, x20 the view): the gameplay view (camera zero's, vtable 0x84c18a88) goes
 //     to the module's hos_coop_view first (the Customize page's camera around your Link), and its matrix is built from the eye and target it gives.
-// Exported for the module (found by name, dlsym RTLD_DEFAULT, as on Linux): hos_coop_menu_state and hos_coop_hud_refresh.
+// Exported for the module (found by name, dlsym RTLD_DEFAULT, as on Linux): hos_coop_menu_state (with the screens that ran in the last 100 ms, row 141:
+// the module finds the player status screen among them for its player list under the HUD) and hos_coop_hud_refresh.
 #include <math.h>
 #include <os/lock.h>
 #include <stdatomic.h>
@@ -29,6 +31,7 @@ int coop_bridge_state(void);                                        // 1 while t
 void *coop_bridge_sym(const char *name);                            // an export of the module while it is on
 int coop_bridge_peek(uint64_t a, void *out, size_t n);              // a fault-safe read
 int coop_bridge_game_call(uint64_t *regs, uint64_t fn, uint64_t x0); // a game function called from a gate's registers
+void coop_bridge_game_screen(uint64_t *regs, uint64_t screen);      // the module's hos_coop_game_screen, with a ctx its game calls may use
 
 #define L(a) ((a) - 0x80020000ull)   // a Longshot address as a main offset
 enum { MENU_TICK = 0, PAUSE_FOCUS = 1, VIEW = 2 };   // bridge.c's sites 18, 19, 20 less 18
@@ -135,6 +138,9 @@ static void menu_tick(uint64_t *regs) {
     if (atomic_load(&g_refresh_wanted) && peek64(screen) == main + HUD_VT && atomic_exchange(&g_refresh_wanted, 0)) {
         if (coop_bridge_game_call(regs, main + HUD_REFRESH, screen)) atomic_fetch_add(&g_refreshes, 1);
     }
+    // Every menu screen's update to the module too, before the screen's own (Squadala!'s patch 0030: its pages in the game's pause menus, the - menu's
+    // Multiplayer, Lobby and Mods tabs and System's Slingshot Settings button; and the screens code mods ask for)
+    coop_bridge_game_screen(regs, screen);
 }
 typedef struct {
     uint32_t size;
@@ -142,11 +148,13 @@ typedef struct {
     uint64_t hud_screen, panel_screen;
     int64_t hud_ran_ns_ago;   // how long ago the HUD screen last ran (-1: not since it was seen); filled when size covers it
     uint32_t hud_refreshes, reserved2;
+    uint32_t screen_count, reserved3;   // (row 141) the screens that ran in the last 100 ms, for the module to find one by its layout's panes (the
+    uint64_t screens[24];               // player status's hearts, magic and d-pad, for its player list under the game's HUD); filled when size covers them
 } menu_state_t;   // Squadala!'s HosCoopMenuState (Longshot's patch 0018)
 __attribute__((visibility("default"))) int hos_coop_menu_state(menu_state_t *out) {
     if (!out || out->size < offsetof(menu_state_t, hud_ran_ns_ago)) return 0;   // (an older module's smaller one too)
-    const int long_one = out->size >= sizeof *out;
-    out->size = long_one ? (uint32_t)sizeof *out : (uint32_t)offsetof(menu_state_t, hud_ran_ns_ago);
+    const int long_one = out->size >= offsetof(menu_state_t, screen_count), with_screens = out->size >= sizeof *out;
+    out->size = with_screens ? (uint32_t)sizeof *out : long_one ? (uint32_t)offsetof(menu_state_t, screen_count) : (uint32_t)offsetof(menu_state_t, hud_ran_ns_ago);
     // (as of the latest update, unless no screen has run for 250 ms: no game menu then; the Map page two frames after it began)
     const int64_t now = mono_ns(), last = atomic_load(&g_last_ns), frame = atomic_load(&g_frame_ns);
     const int live = last && now - last < 250000000;
@@ -159,6 +167,15 @@ __attribute__((visibility("default"))) int hos_coop_menu_state(menu_state_t *out
         const int64_t ran = atomic_load(&g_hud_seen_ns);
         out->hud_ran_ns_ago = out->hud_screen && ran ? now - ran : -1;
         out->hud_refreshes = atomic_load(&g_refreshes), out->reserved2 = 0;
+    }
+    if (with_screens) {
+        uint32_t n = 0;
+        os_unfair_lock_lock(&g_seen_lock);
+        for (int i = 0; i < 24 && n < 24; i++)
+            if (g_seen[i].screen && g_seen[i].running && now - g_seen[i].seen_ns < 100000000) out->screens[n++] = g_seen[i].screen;
+        os_unfair_lock_unlock(&g_seen_lock);
+        out->screen_count = n, out->reserved3 = 0;
+        for (uint32_t i = n; i < 24; i++) out->screens[i] = 0;
     }
     return 1;
 }

@@ -1,8 +1,8 @@
 diff --git a/hookshot/CMakeLists.txt b/hookshot/CMakeLists.txt
-index b2fa90a..0c1ba03 100644
+index 8fefd5cb..591e5831 100644
 --- a/hookshot/CMakeLists.txt
 +++ b/hookshot/CMakeLists.txt
-@@ -50,13 +50,19 @@ if(WIN32)
+@@ -76,13 +76,19 @@ if(WIN32)
    # GetAdaptersAddresses: the Host dialog's Same network and VPN rows name each network card.
    target_link_libraries(hookshot_coop PRIVATE iphlpapi)
  else()
@@ -25,7 +25,7 @@ index b2fa90a..0c1ba03 100644
    # distribution from the one it was built on (CI: Ubuntu 22.04, glibc 2.35, as Longshot's own) up,
    # whatever libstdc++ that system has.
 diff --git a/hookshot/src/coop_clipboard_posix.cpp b/hookshot/src/coop_clipboard_posix.cpp
-index 066f285..ccb29b6 100644
+index 066f285c..ccb29b6c 100644
 --- a/hookshot/src/coop_clipboard_posix.cpp
 +++ b/hookshot/src/coop_clipboard_posix.cpp
 @@ -36,12 +36,14 @@ namespace {
@@ -81,114 +81,39 @@ index 066f285..ccb29b6 100644
  }
  
  OnSdlThread::OnSdlThread() : was_(t_sdl_thread) {
-diff --git a/hookshot/src/coop_map_page.cpp b/hookshot/src/coop_map_page.cpp
-index 1cb0650..e2a2127 100644
---- a/hookshot/src/coop_map_page.cpp
-+++ b/hookshot/src/coop_map_page.cpp
-@@ -96,7 +96,7 @@ std::uint64_t FindPane(void* ctx, const HosCoopApi* api, std::uint64_t layout, c
-         return 0;
-     }
-     HosCoopCall k{};
--    k.function = kFindPane;
-+    k.function = CoopRuntime::MainBase() + (kFindPane - 0x80020000ull);   // (a Longshot address: main's own base on a host that maps main elsewhere)
-     k.x[0] = layout;
-     k.x[1] = at;
-     std::uint64_t pane = 0;
-diff --git a/hookshot/src/coop_rando.cpp b/hookshot/src/coop_rando.cpp
-index 1b17193..7f0bbcf 100644
---- a/hookshot/src/coop_rando.cpp
-+++ b/hookshot/src/coop_rando.cpp
-@@ -671,7 +671,7 @@ std::string OotrrKey(const fs::path& ootrr) {
-     if (ec) return {};
-     const auto when = fs::last_write_time(ootrr, ec);
-     if (ec) return {};
--    return std::to_string(size) + "-" + std::to_string(when.time_since_epoch().count());
-+    return std::to_string(size) + "-" + std::to_string(static_cast<long long>(when.time_since_epoch().count()));   // (libc++ on macOS: a 128-bit count)
- }
+diff --git a/tools/puppet_pack/build.py b/tools/puppet_pack/build.py
+index 163449bc..226ca641 100644
+--- a/tools/puppet_pack/build.py
++++ b/tools/puppet_pack/build.py
+@@ -2503,6 +2503,9 @@ def main(argv=None):
+                     help="Hookshot's game: Host, Join and Co-op Settings as rows of the title (title_menu.py)")
+     ap.add_argument("--pause-tab", action="store_true",
+                     help="Hookshot's game: the pause menu's Multiplayer tab and page (pause_menu.py; patch 0030's module)")
++    ap.add_argument("--no-characters-tab", action="store_true",
++                    help="no co-op Characters tab (charsel_ui.py): for a game that cannot take its code patch (Slingshot, "
++                         "the Mac build, has no ExeFS patches); the - menu keeps the game's three tabs and co-op's")
+     ap.add_argument("--skin", action="append", default=[], metavar="ID=FOLDER",
+                     help="a character model mod (its folder, holding romfs) to make puppets of, "
+                          "CoopPuppet_<age>_Skin_<ID> (skin.py); may be given more than once")
+@@ -2595,7 +2598,7 @@ def _main_build(a, romfs, hud_reader=None):
+               game_read=hud_reader.read if hud_reader is not None else None,
+               body=a.puppet_body, liftable=a.puppet_liftable, pvp=a.puppet_pvp,
+               characters=None if a.no_characters else find_characters(mod_dir),
+-              charsel_native=charsel_native_wanted(mod_dir))
++              charsel_native=charsel_native_wanted(mod_dir) and not a.no_characters_tab)
+     except BuildError as e:
+         print(f"error: {e}", file=sys.stderr)
+         return 1
+diff --git a/tools/puppet_pack/strings/en.txt b/tools/puppet_pack/strings/en.txt
+index 61b7c903..88efe5dd 100644
+--- a/tools/puppet_pack/strings/en.txt
++++ b/tools/puppet_pack/strings/en.txt
+@@ -45,7 +45,7 @@ Coop_Minus_21 = ................................................................
  
- std::string ChatSafe(std::string line, std::size_t max_chars) {
-diff --git a/hookshot/src/coop_title.cpp b/hookshot/src/coop_title.cpp
-index abb61d0..81882a3 100644
---- a/hookshot/src/coop_title.cpp
-+++ b/hookshot/src/coop_title.cpp
-@@ -95,6 +95,12 @@ std::uint64_t NowMs() {
-                                           .count());
- }
- 
-+// A Longshot address (main at 0x80020000, as the constants above) where the game's main is in this process: the same address on Longshot,
-+// main's own base plus the offset on a host that maps main elsewhere (Slingshot on macOS, whose bridge gives main_base)
-+std::uint64_t At(std::uint64_t longshot) {
-+    return CoopRuntime::MainBase() + (longshot - 0x80020000ull);
-+}
-+
- std::uint64_t Read64(std::uint64_t a) {
-     std::uint64_t v = 0;
-     return CoopRuntime::Read(a, &v, sizeof v) ? v : 0;
-@@ -110,7 +116,7 @@ bool HasScratch() {
- // seen) a step came in the last 300 ms.
- bool TitleUp() {
-     const std::uint64_t s = g_screen.load();
--    if (s == 0 || Read64(s) != kTitleVtable) {
-+    if (s == 0 || Read64(s) != At(kTitleVtable)) {
-         return false;
-     }
-     std::uint8_t active = 0;
-@@ -208,19 +214,19 @@ bool SetRowTexts(void* ctx, std::uint64_t screen) {
-         }
-         std::uint64_t x0 = 0;
-         HosCoopCall k{};
--        k.function = kMsgRefInit;
-+        k.function = At(kMsgRefInit);
-         k.x[0] = base;
-         if (!g_api->call(ctx, &k, &x0)) {
-             return false;
-         }
-         k = HosCoopCall{};
--        k.function = kMsgRefSet;
-+        k.function = At(kMsgRefSet);
-         k.x[0] = base, k.x[1] = base + 0x20, k.x[2] = base + 0x28, k.x[3] = 1;
-         if (!g_api->call(ctx, &k, &x0)) {
-             return false;
-         }
-         k = HosCoopCall{};
--        k.function = kPaneText;
-+        k.function = At(kPaneText);
-         k.x[0] = layout, k.x[1] = at_pane, k.x[2] = base, k.x[3] = 1, k.x[4] = 0;
-         if (!g_api->call(ctx, &k, &x0)) {
-             return false;
-@@ -233,7 +239,7 @@ bool SetRowTexts(void* ctx, std::uint64_t screen) {
- 
- // The caption manager (0: not made yet).
- std::uint64_t CaptionMgr() {
--    const std::uint64_t global = Read64(kCaptionMgrGot);
-+    const std::uint64_t global = Read64(At(kCaptionMgrGot));
-     return global != 0 ? Read64(global) : 0;
- }
- 
-@@ -275,7 +281,7 @@ void RefreshSaveList(void* ctx) {
-     in.state = state;
-     in.now_ms = NowMs();
-     if (found && (g_list.pending() || g_list.asked() || in.stale)) {
--        const auto busy = GameCall(ctx, kCaptionBusy, mgr);
-+        const auto busy = GameCall(ctx, At(kCaptionBusy), mgr);
-         in.busy = !busy || (*busy & 1) != 0;
-     }
-     const R::Wait before = g_list.waiting();
-@@ -292,7 +298,7 @@ void RefreshSaveList(void* ctx) {
-     case R::Action::ask: {
-         LOG_INFO(Core, "coop: title: save list: the save folder changed: the game re-reads its save list (before: {}; "
-                        "state {})", CaptionLine(mgr), state);
--        const auto reset = GameCall(ctx, kCaptionReset, 0);
-+        const auto reset = GameCall(ctx, At(kCaptionReset), 0);
-         if (!reset || (*reset & 1) == 0) {
-             g_list.Refused();
-             LOG_INFO(Core, "coop: title: save list: the game's list reset said not now ({}): asked again",
-@@ -301,7 +307,7 @@ void RefreshSaveList(void* ctx) {
-         }
-         std::uint8_t cleared = 0xff;
-         CoopRuntime::Read(mgr + kCaptionState, &cleared, 1);
--        if (!GameCall(ctx, kCaptionReload, mgr)) {
-+        if (!GameCall(ctx, At(kCaptionReload), mgr)) {
-             LOG_WARNING(Core, "coop: title: save list: the game's re-read could not be called: Continue shows after a "
-                               "restart");
-             return;
+ [LayoutMsg/PlusMenu_00.msbt]
+ # System's button of ours (pause_menu.py's Pa_Button_05): Longshot Settings. (0.11.9: co-op's pages are the - menu's.)
+-Pa_System_00-Pa_Button_05-T_Btn_00 = Longshot Settings
++Pa_System_00-Pa_Button_05-T_Btn_00 = Slingshot Settings
+ # Longshot Settings' five rows (Pa_Settings_00): Longshot's options by their tab in its own menu.
+ Pa_Settings_00-Pa_Button_00-T_Btn_00 = Graphics
+ Pa_Settings_00-Pa_Button_01-T_Btn_00 = Audio
